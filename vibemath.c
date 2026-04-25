@@ -167,6 +167,24 @@ typedef struct {
 PhysicsThreadPayload g_physics_payload;
 vmath_thread_t g_physics_thread;
 
+// --- [NEW] QUAD-CORE THREADING PAYLOADS ---
+typedef struct {
+    int start_id;
+    int end_id;
+    RenderMemory* mem;
+    uint32_t* ScreenPtr;
+    float* ZBuffer;
+    int CANVAS_W;
+    int CANVAS_H;
+    int min_clip_y;
+    int max_clip_y;
+} RasterThreadPayload;
+
+RasterThreadPayload g_raster_top_payload;
+RasterThreadPayload g_raster_bot_payload;
+vmath_thread_t g_raster_top_thread;
+vmath_thread_t g_raster_bot_thread;
+
 // ========================================================================
 // MEMORY & PROJECTION (The Core Pipeline)
 // ========================================================================
@@ -1143,6 +1161,32 @@ EXPORT void vmath_swarm_smales(
 // ========================================================================
 // RENDER BATCH HELPERS
 // ========================================================================
+// ========================================================
+// CORE 3 & CORE 4: RASTER WORKERS
+// ========================================================
+THREAD_FUNC vmath_raster_worker(void* arg) {
+    RasterThreadPayload* p = (RasterThreadPayload*)arg;
+    RenderMemory* mem = p->mem;
+
+    for (int id = p->start_id; id <= p->end_id; id++) {
+        // We still check the basic Z-Cull so we don't draw things behind us
+        float r = mem->Obj_Radius[id];
+        // Note: For absolute perfection we'd pass cz_center in, but we can safely skip the 
+        // coarse cull here because project_vertices already marked invisible tris as 'false' in Tri_Valid!
+
+        int tStart = mem->Obj_TriStart[id];
+        int tCount = mem->Obj_TriCount[id];
+
+        vmath_rasterize_triangles(
+            tCount,
+            mem->Tri_V1 + tStart, mem->Tri_V2 + tStart, mem->Tri_V3 + tStart, mem->Tri_Valid + tStart,
+            mem->Vert_PX, mem->Vert_PY, mem->Vert_PZ, mem->Tri_ShadedColor + tStart,
+            p->ScreenPtr, p->ZBuffer, p->CANVAS_W, p->CANVAS_H,
+            p->min_clip_y, p->max_clip_y  // <-- The magical clipping boundaries
+        );
+    }
+    return THREAD_RETURN_VAL;
+}
 
 EXPORT void vmath_render_batch(
     int start_id, int end_id,
@@ -1152,29 +1196,26 @@ EXPORT void vmath_render_batch(
     RenderMemory* mem,
     uint32_t* ScreenPtr, float* ZBuffer, int CANVAS_W, int CANVAS_H
 ) {
-    // 1. Unpack Camera State locally (Very fast)
     float cpx = cam->x, cpy = cam->y, cpz = cam->z;
     float cfw_x = cam->fwx, cfw_y = cam->fwy, cfw_z = cam->fwz;
     float crt_x = cam->rtx, crt_z = cam->rtz;
     float cup_x = cam->upx, cup_y = cam->upy, cup_z = cam->upz;
     float cam_fov = cam->fov;
 
+    // --- PHASE 1: MAIN THREAD DOES PROJECTION AND LIGHTING ---
     for (int id = start_id; id <= end_id; id++) {
         float r = mem->Obj_Radius[id];
         float ox = mem->Obj_X[id], oy = mem->Obj_Y[id], oz = mem->Obj_Z[id];
 
-        // 1. Coarse Z-Cull
         float cz_center = (ox - cpx)*cfw_x + (oy - cpy)*cfw_y + (oz - cpz)*cfw_z;
         if (cz_center + r < 0.1f) continue;
 
-        // 2. Fetch object matrices & slice info
         float rx = mem->Obj_RTX[id], ry = mem->Obj_RTY[id], rz = mem->Obj_RTZ[id];
         float ux = mem->Obj_UPX[id], uy = mem->Obj_UPY[id], uz = mem->Obj_UPZ[id];
         float fx = mem->Obj_FWX[id], fy = mem->Obj_FWY[id], fz = mem->Obj_FWZ[id];
         int vStart = mem->Obj_VertStart[id], vCount = mem->Obj_VertCount[id];
         int tStart = mem->Obj_TriStart[id], tCount = mem->Obj_TriCount[id];
 
-        // 3. Project Vertices
         vmath_project_vertices(
             vCount,
             mem->Vert_LX + vStart, mem->Vert_LY + vStart, mem->Vert_LZ + vStart,
@@ -1184,7 +1225,6 @@ EXPORT void vmath_render_batch(
             cam_fov, HALF_W, HALF_H
         );
 
-        // 4. Assemble & Light Triangles
         vmath_process_triangles(
             tCount,
             mem->Tri_V1 + tStart, mem->Tri_V2 + tStart, mem->Tri_V3 + tStart, mem->Vert_Valid,
@@ -1193,17 +1233,33 @@ EXPORT void vmath_render_batch(
             rx, ry, rz, ux, uy, uz, fx, fy, fz,
             sun_x, sun_y, sun_z
         );
-
-        // 5. Rasterize
-        vmath_rasterize_triangles(
-            tCount,
-            mem->Tri_V1 + tStart, mem->Tri_V2 + tStart, mem->Tri_V3 + tStart, mem->Tri_Valid + tStart,
-            mem->Vert_PX, mem->Vert_PY, mem->Vert_PZ, mem->Tri_ShadedColor + tStart,
-            ScreenPtr, ZBuffer, CANVAS_W, CANVAS_H
-        );
     }
-}
 
+    // --- PHASE 2: DISPATCH CORE 3 AND CORE 4 (RASTERIZATION) ---
+    int mid_y = CANVAS_H / 2;
+
+    // Setup Top Half Payload
+    g_raster_top_payload.start_id = start_id; g_raster_top_payload.end_id = end_id;
+    g_raster_top_payload.mem = mem; g_raster_top_payload.ScreenPtr = ScreenPtr; g_raster_top_payload.ZBuffer = ZBuffer;
+    g_raster_top_payload.CANVAS_W = CANVAS_W; g_raster_top_payload.CANVAS_H = CANVAS_H;
+    g_raster_top_payload.min_clip_y = 0; 
+    g_raster_top_payload.max_clip_y = mid_y - 1;
+
+    // Setup Bottom Half Payload
+    g_raster_bot_payload.start_id = start_id; g_raster_bot_payload.end_id = end_id;
+    g_raster_bot_payload.mem = mem; g_raster_bot_payload.ScreenPtr = ScreenPtr; g_raster_bot_payload.ZBuffer = ZBuffer;
+    g_raster_bot_payload.CANVAS_W = CANVAS_W; g_raster_bot_payload.CANVAS_H = CANVAS_H;
+    g_raster_bot_payload.min_clip_y = mid_y; 
+    g_raster_bot_payload.max_clip_y = CANVAS_H - 1;
+
+    // FIRE THE THREADS!
+    g_raster_top_thread = vmath_thread_start(vmath_raster_worker, &g_raster_top_payload);
+    g_raster_bot_thread = vmath_thread_start(vmath_raster_worker, &g_raster_bot_payload);
+
+    // Main thread waits for both to finish drawing before returning to Lua
+    vmath_thread_join(g_raster_top_thread);
+    vmath_thread_join(g_raster_bot_thread);
+}
 // ========================================================================
 // TESTBED
 // ========================================================================
