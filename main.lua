@@ -55,16 +55,16 @@ function love.draw()
     -- 1. CLEAR BUFFERS
     q[q_len] = CMD.CLEAR; q_len = q_len + 1
 
-    -- 2. CONDITIONAL EXPLOSIONS (The Logic lives in Lua!)
+    -- 2. BASE PHYSICS (Always runs)
+    q[q_len] = CMD.SWARM_APPLY_BASE_PHYSICS; q_len = q_len + 1
+
+    -- 3. CONDITIONAL EXPLOSIONS (The Logic lives in Lua!)
     if love.mouse.isDown(1) then
         q[q_len] = CMD.SWARM_EXPLOSION_PUSH; q_len = q_len + 1
     end
     if love.mouse.isDown(2) then
         q[q_len] = CMD.SWARM_EXPLOSION_PULL; q_len = q_len + 1
     end
-
-    -- 3. BASE PHYSICS (Always runs)
-    q[q_len] = CMD.SWARM_APPLY_BASE_PHYSICS; q_len = q_len + 1
 
     -- 4. TARGET SHAPE KERNEL (Only queue the one we need)
     local state = mem.Swarm_State
