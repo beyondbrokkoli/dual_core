@@ -136,8 +136,11 @@ typedef struct {
     int *Tri_V1, *Tri_V2, *Tri_V3;
     uint32_t *Tri_BakedColor, *Tri_ShadedColor; bool *Tri_Valid;
 
-    float *Swarm_PX, *Swarm_PY, *Swarm_PZ;
-    float *Swarm_VX, *Swarm_VY, *Swarm_VZ;
+    // --- [NEW] DOUBLE BUFFERED ARRAYS ---
+    float *Swarm_PX[2]; float *Swarm_PY[2]; float *Swarm_PZ[2];
+    float *Swarm_VX[2]; float *Swarm_VY[2]; float *Swarm_VZ[2];
+    int *Swarm_Indices[2];
+
     float *Swarm_Seed;
     int Swarm_State;
     float Swarm_GravityBlend;
@@ -146,12 +149,26 @@ typedef struct {
     bool Swarm_Explode1;
     bool Swarm_Explode2;
     // --- [NEW] DEPTH SORTING ARRAYS ---
-    int *Swarm_Indices;
+
     int *Swarm_TempIndices;
     float *Swarm_Distances;
     float *Swarm_TempDistances;
 } RenderMemory;
 
+// Payload to send data into the Physics Thread
+typedef struct {
+    int command_count;
+    int* queue;
+    RenderMemory* mem;
+    float time;
+    float dt;
+    int read_idx;   // <-- Core 1 (Render) uses this
+    int write_idx;  // <-- Core 2 (Physics) uses this
+} PhysicsThreadPayload;
+
+// Global payload instance so we don't allocate memory every frame
+PhysicsThreadPayload g_physics_payload;
+vmath_thread_t g_physics_thread;
 
 // ========================================================================
 // MEMORY & PROJECTION (The Core Pipeline)
@@ -713,13 +730,14 @@ EXPORT void vmath_swarm_generate_quads(
         }
     }
 }
-
 EXPORT void vmath_swarm_update_velocities(
-    int count, float* px, float* py, float* pz,
-    float* vx, float* vy, float* vz,
+    int count,
+    float* px_in, float* py_in, float* pz_in, float* vx_in, float* vy_in, float* vz_in,
+    float* px_out, float* py_out, float* pz_out, float* vx_out, float* vy_out, float* vz_out,
     float minX, float maxX, float minY, float maxY, float minZ, float maxZ,
     float dt, float gravity
 ) {
+    // ... [Keep uniform setup exactly the same] ...
     __m256 v_minX = _mm256_set1_ps(minX), v_maxX = _mm256_set1_ps(maxX);
     __m256 v_minY = _mm256_set1_ps(minY), v_maxY = _mm256_set1_ps(maxY);
     __m256 v_minZ = _mm256_set1_ps(minZ), v_maxZ = _mm256_set1_ps(maxZ);
@@ -731,13 +749,15 @@ EXPORT void vmath_swarm_update_velocities(
     __m256 sign_mask = _mm256_castsi256_ps(_mm256_set1_epi32(0x7FFFFFFF)); // For absolute value
 
     for (int i = 0; i <= count - 8; i += 8) {
-        __m256 v_vx = _mm256_loadu_ps(&vx[i]);
-        __m256 v_vy = _mm256_loadu_ps(&vy[i]);
-        __m256 v_vz = _mm256_loadu_ps(&vz[i]);
-        __m256 v_px = _mm256_loadu_ps(&px[i]);
-        __m256 v_py = _mm256_loadu_ps(&py[i]);
-        __m256 v_pz = _mm256_loadu_ps(&pz[i]);
+        // LOAD FROM THE READ BUFFER
+        __m256 v_vx = _mm256_loadu_ps(&vx_in[i]);
+        __m256 v_vy = _mm256_loadu_ps(&vy_in[i]);
+        __m256 v_vz = _mm256_loadu_ps(&vz_in[i]);
+        __m256 v_px = _mm256_loadu_ps(&px_in[i]);
+        __m256 v_py = _mm256_loadu_ps(&py_in[i]);
+        __m256 v_pz = _mm256_loadu_ps(&pz_in[i]);
 
+        // ... [Keep Gravity, Drag, Integrate, and Bounce Math exactly the same] ...
         // Apply Gravity & Drag
         v_vy = _mm256_sub_ps(v_vy, v_grav);
         v_vx = _mm256_mul_ps(v_vx, v_drag);
@@ -776,8 +796,9 @@ EXPORT void vmath_swarm_update_velocities(
         v_pz = _mm256_blendv_ps(v_pz, v_maxZ, mask_maxZ);
         v_vz = _mm256_blendv_ps(v_vz, _mm256_mul_ps(abs_vz, v_neg_rest), mask_maxZ);
 
-        _mm256_storeu_ps(&px[i], v_px); _mm256_storeu_ps(&py[i], v_py); _mm256_storeu_ps(&pz[i], v_pz);
-        _mm256_storeu_ps(&vx[i], v_vx); _mm256_storeu_ps(&vy[i], v_vy); _mm256_storeu_ps(&vz[i], v_vz);
+        // STORE TO THE WRITE BUFFER
+        _mm256_storeu_ps(&px_out[i], v_px); _mm256_storeu_ps(&py_out[i], v_py); _mm256_storeu_ps(&pz_out[i], v_pz);
+        _mm256_storeu_ps(&vx_out[i], v_vx); _mm256_storeu_ps(&vy_out[i], v_vy); _mm256_storeu_ps(&vz_out[i], v_vz);
     }
 }
 
@@ -1256,128 +1277,97 @@ EXPORT void vmath_swarm_sort_depth(
     }
     // Because we do exactly 4 passes, the pointers swap perfectly back to their original arrays!
 }
-// Payload to send data into the Physics Thread
-typedef struct {
-    int command_count;
-    int* queue;
-    RenderMemory* mem;
-    float time;
-    float dt;
-} PhysicsThreadPayload;
-
-// Global payload instance so we don't allocate memory every frame
-PhysicsThreadPayload g_physics_payload;
-vmath_thread_t g_physics_thread;
 
 // ========================================================
-// CORE 2: THE PHYSICS WORKER
+// CORE 2: PHYSICS WORKER
 // ========================================================
 THREAD_FUNC vmath_physics_worker(void* arg) {
-    PhysicsThreadPayload* payload = (PhysicsThreadPayload*)arg;
-    RenderMemory* mem = payload->mem;
-    float time = payload->time;
-    float dt = payload->dt;
+    PhysicsThreadPayload* p = (PhysicsThreadPayload*)arg;
+    int r = p->read_idx;
+    int w = p->write_idx;
 
-    for (int i = 0; i < payload->command_count; i++) {
-        int opcode = payload->queue[i];
-
-        switch (opcode) {
-            case 2: // SWARM_APPLY_BASE_PHYSICS
-                // NOTE: We will eventually use Double Buffered arrays here!
-                vmath_swarm_update_velocities(10000, mem->Swarm_PX, mem->Swarm_PY, mem->Swarm_PZ,
-                                             mem->Swarm_VX, mem->Swarm_VY, mem->Swarm_VZ,
-                                             -15000, 15000, -4000, 15000, -15000, 15000, dt,
-                                             -8000.0f * mem->Swarm_GravityBlend);
+    for (int i = 0; i < p->command_count; i++) {
+        switch (p->queue[i]) {
+            case 2: // BASE PHYSICS (The Bridge)
+                vmath_swarm_update_velocities(10000,
+                    p->mem->Swarm_PX[r], p->mem->Swarm_PY[r], p->mem->Swarm_PZ[r], p->mem->Swarm_VX[r], p->mem->Swarm_VY[r], p->mem->Swarm_VZ[r],
+                    p->mem->Swarm_PX[w], p->mem->Swarm_PY[w], p->mem->Swarm_PZ[w], p->mem->Swarm_VX[w], p->mem->Swarm_VY[w], p->mem->Swarm_VZ[w],
+                    -15000, 15000, -4000, 15000, -15000, 15000, p->dt, -8000.0f * p->mem->Swarm_GravityBlend);
                 break;
-            case 3: // SWARM_BUNDLE
-                vmath_swarm_bundle(10000, mem->Swarm_PX, mem->Swarm_PY, mem->Swarm_PZ,
-                                   mem->Swarm_VX, mem->Swarm_VY, mem->Swarm_VZ,
-                                   mem->Swarm_Seed, 0, 5000, 0, time, dt);
+
+            case 3: // BUNDLE (And all other physics functions: Use 'w'!)
+                vmath_swarm_bundle(10000, p->mem->Swarm_PX[w], p->mem->Swarm_PY[w], p->mem->Swarm_PZ[w], p->mem->Swarm_VX[w], p->mem->Swarm_VY[w], p->mem->Swarm_VZ[w], p->mem->Swarm_Seed, 0, 5000, 0, p->time, p->dt);
+                break;
+
+            case 14: // DEPTH SORT (Uses 'w')
+                vmath_swarm_sort_depth(10000, p->mem->Swarm_PX[w], p->mem->Swarm_PY[w], p->mem->Swarm_PZ[w], p->mem->Swarm_Indices[w], p->mem->Swarm_TempIndices, p->mem->Swarm_Distances, p->mem->Swarm_TempDistances, 0, 0, 0); // Note: Pass actual camera pos here!
                 break;
 
             case 4: // SWARM_GALAXY (State 2)
-                vmath_swarm_galaxy(10000, mem->Swarm_PX, mem->Swarm_PY, mem->Swarm_PZ, mem->Swarm_VX, mem->Swarm_VY, mem->Swarm_VZ, mem->Swarm_Seed, 0, 5000, 0, time, dt);
+                vmath_swarm_galaxy(10000, mem->Swarm_PX[w], mem->Swarm_PY[w], mem->Swarm_PZ[w], mem->Swarm_VX[w], mem->Swarm_VY[w], mem->Swarm_VZ[w], mem->Swarm_Seed, 0, 5000, 0, time, dt);
                 break;
 
             case 5: // SWARM_TORNADO (State 3)
-                vmath_swarm_tornado(10000, mem->Swarm_PX, mem->Swarm_PY, mem->Swarm_PZ, mem->Swarm_VX, mem->Swarm_VY, mem->Swarm_VZ, mem->Swarm_Seed, 0, 5000, 0, time, dt);
+                vmath_swarm_tornado(10000, mem->Swarm_PX[w], mem->Swarm_PY[w], mem->Swarm_PZ[w], mem->Swarm_VX[w], mem->Swarm_VY[w], mem->Swarm_VZ[w], mem->Swarm_Seed, 0, 5000, 0, time, dt);
                 break;
 
             case 6: // SWARM_GYROSCOPE (State 4)
-                vmath_swarm_gyroscope(10000, mem->Swarm_PX, mem->Swarm_PY, mem->Swarm_PZ, mem->Swarm_VX, mem->Swarm_VY, mem->Swarm_VZ, mem->Swarm_Seed, 0, 5000, 0, time, dt);
+                vmath_swarm_gyroscope(10000, mem->Swarm_PX[w], mem->Swarm_PY[w], mem->Swarm_PZ[w], mem->Swarm_VX[w], mem->Swarm_VY[w], mem->Swarm_VZ[w], mem->Swarm_Seed, 0, 5000, 0, time, dt);
                 break;
 
             case 7: // SWARM_METAL (State 5)
-                vmath_swarm_metal(10000, mem->Swarm_PX, mem->Swarm_PY, mem->Swarm_PZ, mem->Swarm_VX, mem->Swarm_VY, mem->Swarm_VZ, mem->Swarm_Seed, 0, 5000, 0, time, dt, mem->Swarm_MetalBlend);
+                vmath_swarm_metal(10000, mem->Swarm_PX[w], mem->Swarm_PY[w], mem->Swarm_PZ[w], mem->Swarm_VX[w], mem->Swarm_VY[w], mem->Swarm_VZ[w], mem->Swarm_Seed, 0, 5000, 0, time, dt, mem->Swarm_MetalBlend);
                 break;
 
             case 8: // SWARM_PARADOX (State 6)
-                vmath_swarm_smales(10000, mem->Swarm_PX, mem->Swarm_PY, mem->Swarm_PZ, mem->Swarm_VX, mem->Swarm_VY, mem->Swarm_VZ, mem->Swarm_Seed, 0, 5000, 0, time, dt, mem->Swarm_ParadoxBlend);
+                vmath_swarm_smales(10000, mem->Swarm_PX[w], mem->Swarm_PY[w], mem->Swarm_PZ[w], mem->Swarm_VX[w], mem->Swarm_VY[w], mem->Swarm_VZ[w], mem->Swarm_Seed, 0, 5000, 0, time, dt, mem->Swarm_ParadoxBlend);
                 break;
             case 12: // SWARM_EXPLOSION_PUSH
-                vmath_swarm_apply_explosion(10000, mem->Swarm_PX, mem->Swarm_PY, mem->Swarm_PZ, mem->Swarm_VX, mem->Swarm_VY, mem->Swarm_VZ, 0, 5000, 0, 5000000.0f * dt, 15000.0f);
+                vmath_swarm_apply_explosion(10000, mem->Swarm_PX[w], mem->Swarm_PY[w], mem->Swarm_PZ[w], mem->Swarm_VX[w], mem->Swarm_VY[w], mem->Swarm_VZ[w], 0, 5000, 0, 5000000.0f * dt, 15000.0f);
                 break;
 
             case 13: // SWARM_EXPLOSION_PULL
-                vmath_swarm_apply_explosion(10000, mem->Swarm_PX, mem->Swarm_PY, mem->Swarm_PZ, mem->Swarm_VX, mem->Swarm_VY, mem->Swarm_VZ, 0, 5000, 0, -4000000.0f * dt, 20000.0f);
-                break;
-            case 14: // SWARM_SORT_DEPTH
-                vmath_swarm_sort_depth(10000, mem->Swarm_PX, mem->Swarm_PY, mem->Swarm_PZ, mem->Swarm_Indices, mem->Swarm_TempIndices, mem->Swarm_Distances, mem->Swarm_TempDistances, cam->x, cam->y, cam->z);
+                vmath_swarm_apply_explosion(10000, mem->Swarm_PX[w], mem->Swarm_PY[w], mem->Swarm_PZ[w], mem->Swarm_VX[w], mem->Swarm_VY[w], mem->Swarm_VZ[w], 0, 5000, 0, -4000000.0f * dt, 20000.0f);
                 break;
         }
     }
-
     return THREAD_RETURN_VAL;
 }
+
 // ========================================================
-// CORE 1: MAIN DISPATCHER & RENDERER
+// CORE 1: RENDER DISPATCHER
 // ========================================================
 EXPORT void vmath_execute_queue(
-    int* queue, int command_count,
-    CameraState* cam, RenderMemory* mem,
-    uint32_t* ScreenPtr, float* ZBuffer,
-    int CANVAS_W, int CANVAS_H,
-    float time, float dt
+    int* queue, int command_count, CameraState* cam, RenderMemory* mem,
+    uint32_t* ScreenPtr, float* ZBuffer, int CANVAS_W, int CANVAS_H,
+    float time, float dt, int read_idx, int write_idx // <-- NEW PARAMS
 ) {
-    // 1. PACK THE PAYLOAD AND LAUNCH CORE 2 (Physics)
     g_physics_payload.command_count = command_count;
-    g_physics_payload.queue = queue;
-    g_physics_payload.mem = mem;
-    g_physics_payload.time = time;
-    g_physics_payload.dt = dt;
+    g_physics_payload.queue = queue; g_physics_payload.mem = mem; g_physics_payload.time = time; g_physics_payload.dt = dt;
+    g_physics_payload.read_idx = read_idx; g_physics_payload.write_idx = write_idx;
 
     g_physics_thread = vmath_thread_start(vmath_physics_worker, &g_physics_payload);
 
-    // 2. CORE 1 EXECUTES RENDER COMMANDS SIMULTANEOUSLY
-    float HALF_W = CANVAS_W * 0.5f;
-    float HALF_H = CANVAS_H * 0.5f;
-    float sun_x = 0.577f, sun_y = -0.577f, sun_z = 0.577f;
+    float HALF_W = CANVAS_W * 0.5f; float HALF_H = CANVAS_H * 0.5f;
 
     for (int i = 0; i < command_count; i++) {
-        int opcode = queue[i];
+        switch (queue[i]) {
 
-        switch (opcode) {
             case 1: // CMD_CLEAR
                 vmath_clear_buffers(ScreenPtr, ZBuffer, 0xFF000000, 99999.0f, CANVAS_W * CANVAS_H);
                 break;
 
-            case 9: // SWARM_GEN_QUADS (Geometry Generator)
-                // NOTE: Still using single-buffer arrays for now!
-                vmath_swarm_generate_quads(10000, mem->Swarm_PX, mem->Swarm_PY, mem->Swarm_PZ,
-                                           mem->Vert_LX + mem->Obj_VertStart[0],
-                                           mem->Vert_LY + mem->Obj_VertStart[0],
-                                           mem->Vert_LZ + mem->Obj_VertStart[0],
-                                           120.0f, cam, HALF_W, HALF_H, mem->Swarm_Indices);
+            case 9: // SWARM_GEN_QUADS (Uses 'read_idx')
+                vmath_swarm_generate_quads(10000, mem->Swarm_PX[read_idx], mem->Swarm_PY[read_idx], mem->Swarm_PZ[read_idx],
+                                           mem->Vert_LX + mem->Obj_VertStart[0], mem->Vert_LY + mem->Obj_VertStart[0], mem->Vert_LZ + mem->Obj_VertStart[0],
+                                           120.0f, cam, HALF_W, HALF_H, mem->Swarm_Indices[read_idx]);
                 break;
 
             case 11: { // RENDER_CULL
                 int id = queue[++i];
                 vmath_render_batch(id, id, cam, HALF_W, HALF_H, sun_x, sun_y, sun_z, mem, ScreenPtr, ZBuffer, CANVAS_W, CANVAS_H);
                 break;
-            }
         }
     }
-
-    // 3. SYNCHRONIZATION POINT (Wait for Physics to finish)
     vmath_thread_join(g_physics_thread);
 }

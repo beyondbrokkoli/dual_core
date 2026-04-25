@@ -7,7 +7,8 @@ require("bench")
 local CANVAS_W, CANVAS_H
 local ScreenBuffer, ScreenImage, ScreenPtr
 local ZBuffer
-
+local read_buffer = 0
+local write_buffer = 1
 local global_time = 0
 local CMD = {
     CLEAR = 1,
@@ -38,8 +39,6 @@ function love.load()
     Sequence.LoadModule("swarm")
     Sequence.RunPhase("Init")
 
-    -- SPHERE TEMPORARILY DISABLED FOR TESTING
-    -- local id, _ = Memory.ClaimObjects(1) ...
 end
 
 function love.update(dt)
@@ -54,7 +53,7 @@ function love.draw()
     local mem = Memory.RenderStruct
 
     -- 1. CLEAR BUFFERS
-    q[q_len] = CMD.CLEAR; q_len = q_len + 1  
+    q[q_len] = CMD.CLEAR; q_len = q_len + 1
 
     -- 2. CONDITIONAL EXPLOSIONS (The Logic lives in Lua!)
     if love.mouse.isDown(1) then
@@ -85,16 +84,18 @@ function love.draw()
     q[q_len] = CMD.RENDER_CULL; q_len = q_len + 1
     q[q_len] = 0;               q_len = q_len + 1 -- Pass ID 0 as argument
 
-    -- ========================================================
-    -- EXECUTE IN C (Zero logic, 100% throughput)
-    -- ========================================================
     BENCH.Begin("CommandQueue_Execute")
+
+    -- Ping-Pong the buffers!
+    read_buffer, write_buffer = write_buffer, read_buffer
+
     VibeMath.vmath_execute_queue(
         q, q_len,
         MainCamera, mem,
         ScreenPtr, ZBuffer, CANVAS_W, CANVAS_H,
-        global_time, love.timer.getDelta()
+        global_time, love.timer.getDelta(), read_buffer, write_buffer
     )
+
     BENCH.End("CommandQueue_Execute")
 
     ScreenImage:replacePixels(ScreenBuffer)
