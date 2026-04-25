@@ -12,7 +12,7 @@ return function()
 
     function Swarm.Init()
         local A = Memory.Arrays
-        local mem = Memory.RenderStruct -- <-- NEW: Access the C struct directly for the buffers
+        local mem = Memory.RenderStruct
 
         local swarm_obj_id, _ = Memory.ClaimObjects(1)
         local vStart, tStart = Memory.ClaimGeometry(PCOUNT * 4, PCOUNT * 4)
@@ -31,7 +31,6 @@ return function()
         -- [THE DUAL-CORE SEEDING]
         -- =======================================================
         for i = 0, PCOUNT - 1 do
-            -- 1. Generate the random starting values once
             local start_px = (math.random() - 0.5) * 20000
             local start_py = (math.random() - 0.5) * 10000 + 5000
             local start_pz = (math.random() - 0.5) * 20000
@@ -40,7 +39,6 @@ return function()
             local start_vz = (math.random() - 0.5) * 5000
             local seed = i / (PCOUNT - 1)
 
-            -- 2. Write to BOTH buffers so Core 1 and Core 2 have valid starting data!
             mem.Swarm_PX[0][i] = start_px; mem.Swarm_PX[1][i] = start_px;
             mem.Swarm_PY[0][i] = start_py; mem.Swarm_PY[1][i] = start_py;
             mem.Swarm_PZ[0][i] = start_pz; mem.Swarm_PZ[1][i] = start_pz;
@@ -49,12 +47,11 @@ return function()
             mem.Swarm_VY[0][i] = start_vy; mem.Swarm_VY[1][i] = start_vy;
             mem.Swarm_VZ[0][i] = start_vz; mem.Swarm_VZ[1][i] = start_vz;
 
-            -- Seed is still a single static array
             mem.Swarm_Seed[i] = seed
         end
 
         -- =======================================================
-        -- [GEOMETRY BINDING]
+        -- [GEOMETRY BINDING & PRE-BAKED NORMALS]
         -- =======================================================
         local tIdx = tStart
         local col1 = bit.bor(0xFF000000, bit.lshift(255, 16), 0, 0)
@@ -64,10 +61,30 @@ return function()
 
         for i = 0, PCOUNT - 1 do
             local base = vStart + (i * 4)
-            A.Tri_V1[tIdx] = base+0; A.Tri_V2[tIdx] = base+1; A.Tri_V3[tIdx] = base+2; A.Tri_BakedColor[tIdx] = col1; tIdx = tIdx + 1
-            A.Tri_V1[tIdx] = base+0; A.Tri_V2[tIdx] = base+2; A.Tri_V3[tIdx] = base+3; A.Tri_BakedColor[tIdx] = col2; tIdx = tIdx + 1
-            A.Tri_V1[tIdx] = base+0; A.Tri_V2[tIdx] = base+3; A.Tri_V3[tIdx] = base+1; A.Tri_BakedColor[tIdx] = col3; tIdx = tIdx + 1
-            A.Tri_V1[tIdx] = base+1; A.Tri_V2[tIdx] = base+3; A.Tri_V3[tIdx] = base+2; A.Tri_BakedColor[tIdx] = col4; tIdx = tIdx + 1
+            
+            -- FACE 1: Front
+            A.Tri_V1[tIdx] = base+0; A.Tri_V2[tIdx] = base+1; A.Tri_V3[tIdx] = base+2; 
+            A.Tri_LNX[tIdx] = 0.0; A.Tri_LNY[tIdx] = 0.44721; A.Tri_LNZ[tIdx] = 0.89442;
+            A.Tri_BakedColor[tIdx] = col1; 
+            tIdx = tIdx + 1
+            
+            -- FACE 2: Right
+            A.Tri_V1[tIdx] = base+0; A.Tri_V2[tIdx] = base+2; A.Tri_V3[tIdx] = base+3; 
+            A.Tri_LNX[tIdx] = 0.87287; A.Tri_LNY[tIdx] = 0.21821; A.Tri_LNZ[tIdx] = -0.43643;
+            A.Tri_BakedColor[tIdx] = col2; 
+            tIdx = tIdx + 1
+            
+            -- FACE 3: Left
+            A.Tri_V1[tIdx] = base+0; A.Tri_V2[tIdx] = base+3; A.Tri_V3[tIdx] = base+1; 
+            A.Tri_LNX[tIdx] = -0.87287; A.Tri_LNY[tIdx] = 0.21821; A.Tri_LNZ[tIdx] = -0.43643;
+            A.Tri_BakedColor[tIdx] = col3; 
+            tIdx = tIdx + 1
+            
+            -- FACE 4: Bottom
+            A.Tri_V1[tIdx] = base+1; A.Tri_V2[tIdx] = base+3; A.Tri_V3[tIdx] = base+2; 
+            A.Tri_LNX[tIdx] = 0.0; A.Tri_LNY[tIdx] = -1.0; A.Tri_LNZ[tIdx] = 0.0;
+            A.Tri_BakedColor[tIdx] = col4; 
+            tIdx = tIdx + 1
         end
     end
 
@@ -75,14 +92,13 @@ return function()
         local space_down = love.keyboard.isDown("space")
         if space_down and not space_pressed_last then
             target_state = target_state + 1
-            if target_state > 6 then target_state = 0 end -- Restored back to 6!
+            if target_state > 6 then target_state = 0 end
         end
         space_pressed_last = space_down
 
         if target_state == 0 then gravity_blend = math.min(1.0, gravity_blend + dt * 2.0)
         else gravity_blend = math.max(0.0, gravity_blend - dt * 2.0) end
 
-        -- Restored Morph lerping!
         if target_state == 5 then metal_blend = math.min(1.0, metal_blend + dt * 0.5)
         else metal_blend = math.max(0.0, metal_blend - dt * 2.0) end
 
