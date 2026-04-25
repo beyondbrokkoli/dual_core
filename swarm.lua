@@ -12,7 +12,9 @@ return function()
 
     function Swarm.Init()
         local A = Memory.Arrays
-        local swarm_obj_id, _ = Memory.ClaimObjects(1) 
+        local mem = Memory.RenderStruct -- <-- NEW: Access the C struct directly for the buffers
+
+        local swarm_obj_id, _ = Memory.ClaimObjects(1)
         local vStart, tStart = Memory.ClaimGeometry(PCOUNT * 4, PCOUNT * 4)
 
         local id = swarm_obj_id
@@ -21,20 +23,39 @@ return function()
         A.Obj_FWX[id], A.Obj_FWY[id], A.Obj_FWZ[id] = 0, 0, 1
         A.Obj_RTX[id], A.Obj_RTY[id], A.Obj_RTZ[id] = 1, 0, 0
         A.Obj_UPX[id], A.Obj_UPY[id], A.Obj_UPZ[id] = 0, 1, 0
-        
+
         A.Obj_VertStart[id] = vStart; A.Obj_VertCount[id] = PCOUNT * 4
         A.Obj_TriStart[id] = tStart;  A.Obj_TriCount[id] = PCOUNT * 4
 
+        -- =======================================================
+        -- [THE DUAL-CORE SEEDING]
+        -- =======================================================
         for i = 0, PCOUNT - 1 do
-            A.Swarm_PX[i] = (math.random() - 0.5) * 20000
-            A.Swarm_PY[i] = (math.random() - 0.5) * 10000 + 5000
-            A.Swarm_PZ[i] = (math.random() - 0.5) * 20000
-            A.Swarm_VX[i] = (math.random() - 0.5) * 5000
-            A.Swarm_VY[i] = (math.random() - 0.5) * 5000
-            A.Swarm_VZ[i] = (math.random() - 0.5) * 5000
-            A.Swarm_Seed[i] = i / (PCOUNT - 1)
+            -- 1. Generate the random starting values once
+            local start_px = (math.random() - 0.5) * 20000
+            local start_py = (math.random() - 0.5) * 10000 + 5000
+            local start_pz = (math.random() - 0.5) * 20000
+            local start_vx = (math.random() - 0.5) * 5000
+            local start_vy = (math.random() - 0.5) * 5000
+            local start_vz = (math.random() - 0.5) * 5000
+            local seed = i / (PCOUNT - 1)
+
+            -- 2. Write to BOTH buffers so Core 1 and Core 2 have valid starting data!
+            mem.Swarm_PX[0][i] = start_px; mem.Swarm_PX[1][i] = start_px;
+            mem.Swarm_PY[0][i] = start_py; mem.Swarm_PY[1][i] = start_py;
+            mem.Swarm_PZ[0][i] = start_pz; mem.Swarm_PZ[1][i] = start_pz;
+
+            mem.Swarm_VX[0][i] = start_vx; mem.Swarm_VX[1][i] = start_vx;
+            mem.Swarm_VY[0][i] = start_vy; mem.Swarm_VY[1][i] = start_vy;
+            mem.Swarm_VZ[0][i] = start_vz; mem.Swarm_VZ[1][i] = start_vz;
+
+            -- Seed is still a single static array
+            mem.Swarm_Seed[i] = seed
         end
 
+        -- =======================================================
+        -- [GEOMETRY BINDING]
+        -- =======================================================
         local tIdx = tStart
         local col1 = bit.bor(0xFF000000, bit.lshift(255, 16), 0, 0)
         local col2 = bit.bor(0xFF000000, 0, bit.lshift(255, 8), 0)
@@ -42,7 +63,7 @@ return function()
         local col4 = bit.bor(0xFF000000, 0, bit.lshift(255, 8), 255)
 
         for i = 0, PCOUNT - 1 do
-            local base = vStart + (i * 4) 
+            local base = vStart + (i * 4)
             A.Tri_V1[tIdx] = base+0; A.Tri_V2[tIdx] = base+1; A.Tri_V3[tIdx] = base+2; A.Tri_BakedColor[tIdx] = col1; tIdx = tIdx + 1
             A.Tri_V1[tIdx] = base+0; A.Tri_V2[tIdx] = base+2; A.Tri_V3[tIdx] = base+3; A.Tri_BakedColor[tIdx] = col2; tIdx = tIdx + 1
             A.Tri_V1[tIdx] = base+0; A.Tri_V2[tIdx] = base+3; A.Tri_V3[tIdx] = base+1; A.Tri_BakedColor[tIdx] = col3; tIdx = tIdx + 1

@@ -136,8 +136,10 @@ ffi.cdef[[
         int *Tri_V1, *Tri_V2, *Tri_V3;
         uint32_t *Tri_BakedColor, *Tri_ShadedColor; bool *Tri_Valid;
 
-        float *Swarm_PX, *Swarm_PY, *Swarm_PZ;
-        float *Swarm_VX, *Swarm_VY, *Swarm_VZ;
+        float *Swarm_PX[2]; float *Swarm_PY[2]; float *Swarm_PZ[2];
+        float *Swarm_VX[2]; float *Swarm_VY[2]; float *Swarm_VZ[2];
+        int *Swarm_Indices[2];
+
         float *Swarm_Seed;
         int Swarm_State;
         float Swarm_GravityBlend;
@@ -146,7 +148,6 @@ ffi.cdef[[
         bool Swarm_Explode1;
         bool Swarm_Explode2;
 
-        int *Swarm_Indices;
         int *Swarm_TempIndices;
         float *Swarm_Distances;
         float *Swarm_TempDistances;
@@ -158,7 +159,8 @@ ffi.cdef[[
         CameraState* cam, RenderMemory* mem,
         uint32_t* ScreenPtr, float* ZBuffer,
         int CANVAS_W, int CANVAS_H,
-        float time, float dt
+        float time, float dt,
+        int read_idx, int write_idx //
     );
 ]]
 
@@ -208,9 +210,26 @@ end
 
 Memory.RenderStruct = ffi.new("RenderMemory")
 
--- Automatically map the Lua FFI arrays to the C-Struct!
+-- ========================================================================
+-- [6] THE DUAL-CORE BUFFER ALLOCATION
+-- ========================================================================
+-- We manually allocate the Ping-Pong buffers directly into the C-Struct
+for i = 0, 1 do
+    Memory.RenderStruct.Swarm_PX[i] = ffi.new("float[?]", 10000)
+    Memory.RenderStruct.Swarm_PY[i] = ffi.new("float[?]", 10000)
+    Memory.RenderStruct.Swarm_PZ[i] = ffi.new("float[?]", 10000)
+    Memory.RenderStruct.Swarm_VX[i] = ffi.new("float[?]", 10000)
+    Memory.RenderStruct.Swarm_VY[i] = ffi.new("float[?]", 10000)
+    Memory.RenderStruct.Swarm_VZ[i] = ffi.new("float[?]", 10000)
+    Memory.RenderStruct.Swarm_Indices[i] = ffi.new("int[?]", 10000)
+end
+
+-- ========================================================================
+-- [7] THE AUTOMATIC STRUCT BINDING
+-- ========================================================================
+-- Automatically map all the standard Lua FFI arrays (created via AllocateSoA) to the C-Struct!
 for array_name, array_ptr in pairs(Memory.Arrays) do
-    -- pcall protects us in case an array (like BoundSphere) isn't in the Render struct
+    -- pcall protects us in case an array isn't in the Render struct
     pcall(function() Memory.RenderStruct[array_name] = array_ptr end)
 end
 

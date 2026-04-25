@@ -1283,24 +1283,27 @@ EXPORT void vmath_swarm_sort_depth(
 // ========================================================
 THREAD_FUNC vmath_physics_worker(void* arg) {
     PhysicsThreadPayload* p = (PhysicsThreadPayload*)arg;
+    
+    // Unpack the payload so the cases can use these variables directly!
+    RenderMemory* mem = p->mem;
+    float time = p->time;
+    float dt = p->dt;
     int r = p->read_idx;
     int w = p->write_idx;
 
     for (int i = 0; i < p->command_count; i++) {
-        switch (p->queue[i]) {
-            case 2: // BASE PHYSICS (The Bridge)
-                vmath_swarm_update_velocities(10000,
-                    p->mem->Swarm_PX[r], p->mem->Swarm_PY[r], p->mem->Swarm_PZ[r], p->mem->Swarm_VX[r], p->mem->Swarm_VY[r], p->mem->Swarm_VZ[r],
-                    p->mem->Swarm_PX[w], p->mem->Swarm_PY[w], p->mem->Swarm_PZ[w], p->mem->Swarm_VX[w], p->mem->Swarm_VY[w], p->mem->Swarm_VZ[w],
-                    -15000, 15000, -4000, 15000, -15000, 15000, p->dt, -8000.0f * p->mem->Swarm_GravityBlend);
+        int opcode = p->queue[i];
+
+        switch (opcode) {
+            case 2: // SWARM_APPLY_BASE_PHYSICS (The Bridge: Reads from R, Writes to W)
+                vmath_swarm_update_velocities(10000, 
+                    mem->Swarm_PX[r], mem->Swarm_PY[r], mem->Swarm_PZ[r], mem->Swarm_VX[r], mem->Swarm_VY[r], mem->Swarm_VZ[r],
+                    mem->Swarm_PX[w], mem->Swarm_PY[w], mem->Swarm_PZ[w], mem->Swarm_VX[w], mem->Swarm_VY[w], mem->Swarm_VZ[w],
+                    -15000, 15000, -4000, 15000, -15000, 15000, dt, -8000.0f * mem->Swarm_GravityBlend);
                 break;
 
-            case 3: // BUNDLE (And all other physics functions: Use 'w'!)
-                vmath_swarm_bundle(10000, p->mem->Swarm_PX[w], p->mem->Swarm_PY[w], p->mem->Swarm_PZ[w], p->mem->Swarm_VX[w], p->mem->Swarm_VY[w], p->mem->Swarm_VZ[w], p->mem->Swarm_Seed, 0, 5000, 0, p->time, p->dt);
-                break;
-
-            case 14: // DEPTH SORT (Uses 'w')
-                vmath_swarm_sort_depth(10000, p->mem->Swarm_PX[w], p->mem->Swarm_PY[w], p->mem->Swarm_PZ[w], p->mem->Swarm_Indices[w], p->mem->Swarm_TempIndices, p->mem->Swarm_Distances, p->mem->Swarm_TempDistances, 0, 0, 0); // Note: Pass actual camera pos here!
+            case 3: // SWARM_BUNDLE (State 1) - Everything else modifies W!
+                vmath_swarm_bundle(10000, mem->Swarm_PX[w], mem->Swarm_PY[w], mem->Swarm_PZ[w], mem->Swarm_VX[w], mem->Swarm_VY[w], mem->Swarm_VZ[w], mem->Swarm_Seed, 0, 5000, 0, time, dt);
                 break;
 
             case 4: // SWARM_GALAXY (State 2)
@@ -1322,6 +1325,7 @@ THREAD_FUNC vmath_physics_worker(void* arg) {
             case 8: // SWARM_PARADOX (State 6)
                 vmath_swarm_smales(10000, mem->Swarm_PX[w], mem->Swarm_PY[w], mem->Swarm_PZ[w], mem->Swarm_VX[w], mem->Swarm_VY[w], mem->Swarm_VZ[w], mem->Swarm_Seed, 0, 5000, 0, time, dt, mem->Swarm_ParadoxBlend);
                 break;
+                
             case 12: // SWARM_EXPLOSION_PUSH
                 vmath_swarm_apply_explosion(10000, mem->Swarm_PX[w], mem->Swarm_PY[w], mem->Swarm_PZ[w], mem->Swarm_VX[w], mem->Swarm_VY[w], mem->Swarm_VZ[w], 0, 5000, 0, 5000000.0f * dt, 15000.0f);
                 break;
@@ -1329,45 +1333,66 @@ THREAD_FUNC vmath_physics_worker(void* arg) {
             case 13: // SWARM_EXPLOSION_PULL
                 vmath_swarm_apply_explosion(10000, mem->Swarm_PX[w], mem->Swarm_PY[w], mem->Swarm_PZ[w], mem->Swarm_VX[w], mem->Swarm_VY[w], mem->Swarm_VZ[w], 0, 5000, 0, -4000000.0f * dt, 20000.0f);
                 break;
+
+            case 14: // SWARM_SORT_DEPTH
+                vmath_swarm_sort_depth(10000, mem->Swarm_PX[w], mem->Swarm_PY[w], mem->Swarm_PZ[w], mem->Swarm_Indices[w], mem->Swarm_TempIndices, mem->Swarm_Distances, mem->Swarm_TempDistances, 0, 0, 0); // Note: Assuming camera is near 0,0,0 for now
+                break;
         }
     }
+
     return THREAD_RETURN_VAL;
 }
-
 // ========================================================
-// CORE 1: RENDER DISPATCHER
+// CORE 1: MAIN DISPATCHER & RENDERER
 // ========================================================
 EXPORT void vmath_execute_queue(
-    int* queue, int command_count, CameraState* cam, RenderMemory* mem,
-    uint32_t* ScreenPtr, float* ZBuffer, int CANVAS_W, int CANVAS_H,
-    float time, float dt, int read_idx, int write_idx // <-- NEW PARAMS
+    int* queue, int command_count,
+    CameraState* cam, RenderMemory* mem,
+    uint32_t* ScreenPtr, float* ZBuffer,
+    int CANVAS_W, int CANVAS_H,
+    float time, float dt,
+    int read_idx, int write_idx
 ) {
+    // 1. PACK THE PAYLOAD AND LAUNCH CORE 2 (Physics)
     g_physics_payload.command_count = command_count;
-    g_physics_payload.queue = queue; g_physics_payload.mem = mem; g_physics_payload.time = time; g_physics_payload.dt = dt;
-    g_physics_payload.read_idx = read_idx; g_physics_payload.write_idx = write_idx;
-
+    g_physics_payload.queue = queue;
+    g_physics_payload.mem = mem;
+    g_physics_payload.time = time;
+    g_physics_payload.dt = dt;
+    g_physics_payload.read_idx = read_idx;
+    g_physics_payload.write_idx = write_idx;
+    
     g_physics_thread = vmath_thread_start(vmath_physics_worker, &g_physics_payload);
 
-    float HALF_W = CANVAS_W * 0.5f; float HALF_H = CANVAS_H * 0.5f;
+    // 2. CORE 1 EXECUTES RENDER COMMANDS SIMULTANEOUSLY
+    float HALF_W = CANVAS_W * 0.5f;
+    float HALF_H = CANVAS_H * 0.5f;
+    float sun_x = 0.577f, sun_y = -0.577f, sun_z = 0.577f;
 
     for (int i = 0; i < command_count; i++) {
-        switch (queue[i]) {
+        int opcode = queue[i];
 
+        switch (opcode) {
             case 1: // CMD_CLEAR
                 vmath_clear_buffers(ScreenPtr, ZBuffer, 0xFF000000, 99999.0f, CANVAS_W * CANVAS_H);
                 break;
 
-            case 9: // SWARM_GEN_QUADS (Uses 'read_idx')
-                vmath_swarm_generate_quads(10000, mem->Swarm_PX[read_idx], mem->Swarm_PY[read_idx], mem->Swarm_PZ[read_idx],
-                                           mem->Vert_LX + mem->Obj_VertStart[0], mem->Vert_LY + mem->Obj_VertStart[0], mem->Vert_LZ + mem->Obj_VertStart[0],
-                                           120.0f, cam, HALF_W, HALF_H, mem->Swarm_Indices[read_idx]);
+            case 9: // SWARM_GEN_QUADS (Reads from R)
+                vmath_swarm_generate_quads(10000, mem->Swarm_PX[read_idx], mem->Swarm_PY[read_idx], mem->Swarm_PZ[read_idx], mem->Vert_LX + mem->Obj_VertStart[0], mem->Vert_LY + mem->Obj_VertStart[0], mem->Vert_LZ + mem->Obj_VertStart[0], 120.0f, cam, HALF_W, HALF_H, mem->Swarm_Indices[read_idx]);
+                break;
+
+            case 10: // SPHERE_TICK
+                vmath_generate_basic_sphere(mem->Vert_LX + mem->Obj_VertStart[1], mem->Vert_LY + mem->Obj_VertStart[1], mem->Vert_LZ + mem->Obj_VertStart[1], 100, 100, 3500.0f);
                 break;
 
             case 11: { // RENDER_CULL
-                int id = queue[++i];
+                int id = queue[++i]; 
                 vmath_render_batch(id, id, cam, HALF_W, HALF_H, sun_x, sun_y, sun_z, mem, ScreenPtr, ZBuffer, CANVAS_W, CANVAS_H);
                 break;
+            }
         }
     }
+
+    // 3. SYNCHRONIZATION POINT (Wait for Physics to finish)
     vmath_thread_join(g_physics_thread);
 }
