@@ -547,8 +547,6 @@ EXPORT void vmath_rasterize_list(
         
         float inv_total = 1.0f / total_height;
 
-        // ... [KEEP YOUR EXACT UPPER AND LOWER TRIANGLE LOOPS HERE] ...
-        // (Just the y_start / y_end loops, exactly as they are)
         // ==========================================
         // UPPER TRIANGLE (Keep the exact same math, just limit the Y loop!)
         // ==========================================
@@ -697,7 +695,8 @@ EXPORT void vmath_swarm_generate_quads(
     float dead_z = cam->z - cam->fwz * 1000.0f;
 
     int v_idx = 0;
-    for (int i = 0; i <= count - 8; i += 8) {
+    int i = 0; // <--- DECLARE 'i' OUTSIDE THE LOOP!
+    for (; i <= count - 8; i += 8) {
 
         // [NEW] Load the 8 sorted indices
         __m256i v_idx_vec = _mm256_loadu_si256((__m256i*)&indices[i]);
@@ -762,6 +761,50 @@ EXPORT void vmath_swarm_generate_quads(
             }
         }
     }
+    // ========================================================
+    // SCALAR TAIL LOOP (For Safety - Mod 8 remainders)
+    // ========================================================
+    for (; i < count; i++) {
+        int actual_id = indices[i];
+        float p_x = px[actual_id];
+        float p_y = py[actual_id];
+        float p_z = pz[actual_id];
+
+        // 1. Vector from Camera to Particle
+        float dx = p_x - cam->x;
+        float dy = p_y - cam->y;
+        float dz = p_z - cam->z;
+
+        // 2. Project into Camera Space
+        float cz = dz * cam->fwz + dy * cam->fwy + dx * cam->fwx;
+        float depth = fmaxf(0.1f, cz); // Prevent division by zero
+
+        float cx = dz * cam->rtz + dy * cam->rty + dx * cam->rtx;
+        float cy = dz * cam->upz + dy * cam->upy + dx * cam->upx;
+
+        // 3. Calculate Frustum Bounds at this depth
+        float frustum_w = ((HALF_W * depth) / cam->fov) + size;
+        float frustum_h = ((HALF_H * depth) / cam->fov) + size;
+
+        // 4. Visibility Mask Check
+        bool is_visible = (cz + size >= 0.1f) && 
+                          (fabsf(cx) <= frustum_w) && 
+                          (fabsf(cy) <= frustum_h);
+
+        if (is_visible) {
+            // SURVIVOR: Build the actual tetrahedron
+            lx[v_idx] = p_x;        ly[v_idx] = p_y + size; lz[v_idx] = p_z;        v_idx++;
+            lx[v_idx] = p_x - size; ly[v_idx] = p_y - size; lz[v_idx] = p_z + size; v_idx++;
+            lx[v_idx] = p_x + size; ly[v_idx] = p_y - size; lz[v_idx] = p_z + size; v_idx++;
+            lx[v_idx] = p_x;        ly[v_idx] = p_y - size; lz[v_idx] = p_z - size; v_idx++;
+        } else {
+            // CASUALTY: Teleport behind camera
+            lx[v_idx] = dead_x; ly[v_idx] = dead_y; lz[v_idx] = dead_z; v_idx++;
+            lx[v_idx] = dead_x; ly[v_idx] = dead_y; lz[v_idx] = dead_z; v_idx++;
+            lx[v_idx] = dead_x; ly[v_idx] = dead_y; lz[v_idx] = dead_z; v_idx++;
+            lx[v_idx] = dead_x; ly[v_idx] = dead_y; lz[v_idx] = dead_z; v_idx++;
+        }
+    }
 }
 EXPORT void vmath_swarm_update_velocities(
     int count,
@@ -770,7 +813,6 @@ EXPORT void vmath_swarm_update_velocities(
     float minX, float maxX, float minY, float maxY, float minZ, float maxZ,
     float dt, float gravity
 ) {
-    // ... [Keep uniform setup exactly the same] ...
     __m256 v_minX = _mm256_set1_ps(minX), v_maxX = _mm256_set1_ps(maxX);
     __m256 v_minY = _mm256_set1_ps(minY), v_maxY = _mm256_set1_ps(maxY);
     __m256 v_minZ = _mm256_set1_ps(minZ), v_maxZ = _mm256_set1_ps(maxZ);
@@ -781,7 +823,8 @@ EXPORT void vmath_swarm_update_velocities(
     __m256 v_neg_rest = _mm256_set1_ps(-0.8f);
     __m256 sign_mask = _mm256_castsi256_ps(_mm256_set1_epi32(0x7FFFFFFF)); // For absolute value
 
-    for (int i = 0; i <= count - 8; i += 8) {
+    int i = 0; // <--- DECLARE 'i' OUTSIDE THE LOOP!
+    for (; i <= count - 8; i += 8) {
         // LOAD FROM THE READ BUFFER
         __m256 v_vx = _mm256_loadu_ps(&vx_in[i]);
         __m256 v_vy = _mm256_loadu_ps(&vy_in[i]);
@@ -790,7 +833,6 @@ EXPORT void vmath_swarm_update_velocities(
         __m256 v_py = _mm256_loadu_ps(&py_in[i]);
         __m256 v_pz = _mm256_loadu_ps(&pz_in[i]);
 
-        // ... [Keep Gravity, Drag, Integrate, and Bounce Math exactly the same] ...
         // Apply Gravity & Drag
         v_vy = _mm256_sub_ps(v_vy, v_grav);
         v_vx = _mm256_mul_ps(v_vx, v_drag);
@@ -833,6 +875,64 @@ EXPORT void vmath_swarm_update_velocities(
         _mm256_storeu_ps(&px_out[i], v_px); _mm256_storeu_ps(&py_out[i], v_py); _mm256_storeu_ps(&pz_out[i], v_pz);
         _mm256_storeu_ps(&vx_out[i], v_vx); _mm256_storeu_ps(&vy_out[i], v_vy); _mm256_storeu_ps(&vz_out[i], v_vz);
     }
+    // ========================================================
+    // SCALAR TAIL LOOP (For Safety - Mod 8 remainders)
+    // ========================================================
+    for (; i < count; i++) {
+        // LOAD FROM THE READ BUFFER
+        float px = px_in[i];
+        float py = py_in[i];
+        float pz = pz_in[i];
+        float vx = vx_in[i];
+        float vy = vy_in[i];
+        float vz = vz_in[i];
+
+        // Apply Gravity & Drag
+        vy -= (gravity * dt);
+        vx *= 0.995f;
+        vy *= 0.995f;
+        vz *= 0.995f;
+
+        // Integrate Position
+        px += vx * dt;
+        py += vy * dt;
+        pz += vz * dt;
+
+        // --- X BOUNCE ---
+        if (px < minX) {
+            px = minX;
+            vx = fabsf(vx) * 0.8f;
+        } else if (px > maxX) {
+            px = maxX;
+            vx = fabsf(vx) * -0.8f;
+        }
+
+        // --- Y BOUNCE ---
+        if (py < minY) {
+            py = minY;
+            vy = fabsf(vy) * 0.8f;
+        } else if (py > maxY) {
+            py = maxY;
+            vy = fabsf(vy) * -0.8f;
+        }
+
+        // --- Z BOUNCE ---
+        if (pz < minZ) {
+            pz = minZ;
+            vz = fabsf(vz) * 0.8f;
+        } else if (pz > maxZ) {
+            pz = maxZ;
+            vz = fabsf(vz) * -0.8f;
+        }
+
+        // STORE TO THE WRITE BUFFER
+        px_out[i] = px;
+        py_out[i] = py;
+        pz_out[i] = pz;
+        vx_out[i] = vx;
+        vy_out[i] = vy;
+        vz_out[i] = vz;
+    }
 }
 
 EXPORT void vmath_swarm_apply_explosion(
@@ -846,7 +946,8 @@ EXPORT void vmath_swarm_apply_explosion(
     __m256 v_force = _mm256_set1_ps(force);
     __m256 v_inv_radius = _mm256_set1_ps(1.0f / radius);
 
-    for (int i = 0; i <= count - 8; i += 8) {
+    int i = 0; // <--- EXTRACTED SO IT SURVIVES FOR THE SCALAR LOOP!
+    for (; i <= count - 8; i += 8) {
         __m256 dx = _mm256_sub_ps(_mm256_loadu_ps(&px[i]), v_ex);
         __m256 dy = _mm256_sub_ps(_mm256_loadu_ps(&py[i]), v_ey);
         __m256 dz = _mm256_sub_ps(_mm256_loadu_ps(&pz[i]), v_ez);
@@ -877,6 +978,34 @@ EXPORT void vmath_swarm_apply_explosion(
             _mm256_storeu_ps(&vz[i], v_vz);
         }
     }
+    // ========================================================
+    // SCALAR TAIL LOOP (For Safety - Mod 8 remainders)
+    // ========================================================
+    float inv_radius = 1.0f / radius;
+    float r2 = radius * radius;
+
+    for (; i < count; i++) {
+        float dx = px[i] - ex;
+        float dy = py[i] - ey;
+        float dz = pz[i] - ez;
+
+        float dist2 = dx * dx + dy * dy + dz * dz;
+
+        // Apply only if it's within the blast radius and not exactly at the origin (to prevent divide-by-zero)
+        if (dist2 > 1.0f && dist2 < r2) {
+            float dist = sqrtf(dist2);
+
+            // Linear falloff: 100% force at center, 0% at edge of radius
+            float f = force * (1.0f - dist * inv_radius);
+
+            // Divide by distance once so we can multiply by the raw dx/dy/dz vectors
+            float f_inv_dist = f / dist;
+
+            vx[i] += dx * f_inv_dist;
+            vy[i] += dy * f_inv_dist;
+            vz[i] += dz * f_inv_dist;
+        }
+    }
 }
 
 // Boilerplate Spring Physics Macro to keep the shape functions perfectly clean
@@ -902,7 +1031,8 @@ EXPORT void vmath_swarm_bundle(
     __m256 v_1 = _mm256_set1_ps(1.0f), v_2 = _mm256_set1_ps(2.0f);
     __m256 v_dt = _mm256_set1_ps(dt), v_k = _mm256_set1_ps(4.0f * dt), v_damp = _mm256_set1_ps(0.92f);
 
-    for (int i = 0; i <= count - 8; i += 8) {
+    int i = 0; // <--- EXTRACTED FOR THE SCALAR TAIL!
+    for (; i <= count - 8; i += 8) {
         __m256 v_s = _mm256_loadu_ps(&seed[i]);
         __m256 v_i = _mm256_set_ps(i+7, i+6, i+5, i+4, i+3, i+2, i+1, i);
 
@@ -918,17 +1048,54 @@ EXPORT void vmath_swarm_bundle(
 
         APPLY_SPRING_PHYSICS();
     }
+    // ========================================================
+    // SCALAR TAIL LOOP (For Safety - Mod 8 remainders)
+    // ========================================================
+    float r = 2000.0f + 400.0f * sinf(time * 6.0f);
+    float golden = 2.39996323f;
+    float k = 4.0f * dt;
+    float damp = 0.92f;
+
+    for (; i < count; i++) {
+        float s = seed[i];
+        float phi = (float)i * golden;
+
+        // Math Hack: No acos needed!
+        float cos_theta = 1.0f - 2.0f * s;
+        float sin_theta = 2.0f * sqrtf(s * (1.0f - s));
+
+        float tx = cx + r * sin_theta * cosf(phi);
+        float ty = cy + r * cos_theta;
+        float tz = cz + r * sin_theta * sinf(phi);
+
+        // SPRING PHYSICS
+        float p_x = px[i], p_y = py[i], p_z = pz[i];
+        float v_x = vx[i], v_y = vy[i], v_z = vz[i];
+
+        v_x = (v_x + (tx - p_x) * k) * damp;
+        v_y = (v_y + (ty - p_y) * k) * damp;
+        v_z = (v_z + (tz - p_z) * k) * damp;
+
+        px[i] = p_x + v_x * dt;
+        py[i] = p_y + v_y * dt;
+        pz[i] = p_z + v_z * dt;
+
+        vx[i] = v_x;
+        vy[i] = v_y;
+        vz[i] = v_z;
+    }
 }
 
 EXPORT void vmath_swarm_galaxy(
-    int count, float* px, float* py, float* pz, float* vx, float* vy, float* vz, float* seed, 
+    int count, float* px, float* py, float* pz, float* vx, float* vy, float* vz, float* seed,
     float cx, float cy, float cz, float time, float dt
 ) {
     __m256 v_cx = _mm256_set1_ps(cx), v_cy = _mm256_set1_ps(cy), v_cz = _mm256_set1_ps(cz);
     __m256 v_time_ang = _mm256_set1_ps(time * 1.5f), v_time_z = _mm256_set1_ps(time * 3.0f);
     __m256 v_dt = _mm256_set1_ps(dt), v_k = _mm256_set1_ps(4.0f * dt), v_damp = _mm256_set1_ps(0.92f);
 
-    for (int i = 0; i <= count - 8; i += 8) {
+    int i = 0;
+    for (; i <= count - 8; i += 8) {
         __m256 v_s = _mm256_loadu_ps(&seed[i]);
         __m256 v_angle = _mm256_fmadd_ps(v_s, _mm256_set1_ps(3.14159f * 30.0f), v_time_ang);
         __m256 v_r = _mm256_fmadd_ps(v_s, _mm256_set1_ps(14000.0f), _mm256_set1_ps(1000.0f));
@@ -938,6 +1105,42 @@ EXPORT void vmath_swarm_galaxy(
         __m256 v_tz = _mm256_fmadd_ps(v_r, fast_sin_avx(v_angle), v_cz);
 
         APPLY_SPRING_PHYSICS();
+    }
+    // ========================================================
+    // SCALAR TAIL LOOP (For Safety - Mod 8 remainders)
+    // ========================================================
+    float k = 4.0f * dt;
+    float damp = 0.92f;
+    float time_ang = time * 1.5f;
+    float time_z = time * 3.0f;
+
+    for (; i < count; i++) {
+        float s = seed[i];
+
+        // 1. Calculate Galaxy Arms & Radius
+        float angle = s * (3.14159f * 30.0f) + time_ang;
+        float r = s * 14000.0f + 1000.0f;
+
+        // 2. Target Positions (with the fnmadd Y-wobble math)
+        float tx = cx + r * cosf(angle);
+        float ty = cy + 800.0f * sinf((s * 40.0f) - time_z);
+        float tz = cz + r * sinf(angle);
+
+        // 3. SPRING PHYSICS
+        float p_x = px[i], p_y = py[i], p_z = pz[i];
+        float v_x = vx[i], v_y = vy[i], v_z = vz[i];
+
+        v_x = (v_x + (tx - p_x) * k) * damp;
+        v_y = (v_y + (ty - p_y) * k) * damp;
+        v_z = (v_z + (tz - p_z) * k) * damp;
+
+        px[i] = p_x + v_x * dt;
+        py[i] = p_y + v_y * dt;
+        pz[i] = p_z + v_z * dt;
+
+        vx[i] = v_x;
+        vy[i] = v_y;
+        vz[i] = v_z;
     }
 }
 
@@ -949,7 +1152,8 @@ EXPORT void vmath_swarm_tornado(
     __m256 v_time_ang = _mm256_set1_ps(time * 4.0f);
     __m256 v_dt = _mm256_set1_ps(dt), v_k = _mm256_set1_ps(4.0f * dt), v_damp = _mm256_set1_ps(0.92f);
 
-    for (int i = 0; i <= count - 8; i += 8) {
+    int i = 0;
+    for (; i <= count - 8; i += 8) {
         __m256 v_s = _mm256_loadu_ps(&seed[i]);
         __m256 v_height = _mm256_fnmadd_ps(_mm256_set1_ps(-24000.0f), v_s, _mm256_set1_ps(-12000.0f));
         __m256 v_angle = _mm256_fnmadd_ps(v_time_ang, _mm256_set1_ps(1.0f), _mm256_mul_ps(v_s, _mm256_set1_ps(3.14159f * 30.0f)));
@@ -960,6 +1164,42 @@ EXPORT void vmath_swarm_tornado(
         __m256 v_tz = _mm256_fmadd_ps(v_r, fast_sin_avx(v_angle), v_cz);
 
         APPLY_SPRING_PHYSICS();
+    }
+    // ========================================================
+    // SCALAR TAIL LOOP (For Safety - Mod 8 remainders)
+    // ========================================================
+    float k = 4.0f * dt;
+    float damp = 0.92f;
+    float time_ang = time * 4.0f;
+
+    for (; i < count; i++) {
+        float s = seed[i];
+
+        // 1. Calculate Tornado Structure
+        float height = 24000.0f * s - 12000.0f;
+        float angle = (s * 3.14159f * 30.0f) - time_ang;
+        float r = s * 4000.0f + 2000.0f;
+
+        // 2. Target Positions
+        float tx = cx + r * cosf(angle);
+        float ty = cy + height;
+        float tz = cz + r * sinf(angle);
+
+        // 3. SPRING PHYSICS
+        float p_x = px[i], p_y = py[i], p_z = pz[i];
+        float v_x = vx[i], v_y = vy[i], v_z = vz[i];
+
+        v_x = (v_x + (tx - p_x) * k) * damp;
+        v_y = (v_y + (ty - p_y) * k) * damp;
+        v_z = (v_z + (tz - p_z) * k) * damp;
+
+        px[i] = p_x + v_x * dt;
+        py[i] = p_y + v_y * dt;
+        pz[i] = p_z + v_z * dt;
+
+        vx[i] = v_x;
+        vy[i] = v_y;
+        vz[i] = v_z;
     }
 }
 
@@ -972,7 +1212,8 @@ EXPORT void vmath_swarm_gyroscope(
     __m256 v_time_ang = _mm256_set1_ps(time * 2.5f);
     __m256 v_dt = _mm256_set1_ps(dt), v_k = _mm256_set1_ps(4.0f * dt), v_damp = _mm256_set1_ps(0.92f);
 
-    for (int i = 0; i <= count - 8; i += 8) {
+    int i = 0;
+    for (; i <= count - 8; i += 8) {
         __m256 v_s = _mm256_loadu_ps(&seed[i]);
         __m256 v_angle = _mm256_fmadd_ps(v_s, _mm256_set1_ps(3.14159f * 2.0f), v_time_ang);
 
@@ -996,6 +1237,58 @@ EXPORT void vmath_swarm_gyroscope(
         __m256 v_tz = _mm256_blendv_ps(r2_z, _mm256_blendv_ps(r1_z, r0_z, m0), _mm256_or_ps(m0, m1));
 
         APPLY_SPRING_PHYSICS();
+    }
+    // ========================================================
+    // SCALAR TAIL LOOP (For Safety - Mod 8 remainders)
+    // ========================================================
+    float k = 4.0f * dt;
+    float damp = 0.92f;
+    float time_ang = time * 2.5f;
+    float r = 7000.0f;
+
+    for (; i < count; i++) {
+        float s = seed[i];
+        float angle = (s * 3.14159f * 2.0f) + time_ang;
+
+        float c = cosf(angle);
+        float sa = sinf(angle);
+
+        float tx, ty, tz;
+        int ring = i % 3;
+
+        // 1. Calculate Target Position based on Ring ID
+        if (ring == 0) {
+            // Ring 0: XY Plane
+            tx = cx + r * c;
+            ty = cy + r * sa;
+            tz = cz;
+        } else if (ring == 1) {
+            // Ring 1: XZ Plane
+            tx = cx + r * c;
+            ty = cy;
+            tz = cz + r * sa;
+        } else {
+            // Ring 2: YZ Plane
+            tx = cx;
+            ty = cy + r * c;
+            tz = cz + r * sa;
+        }
+
+        // 2. SPRING PHYSICS
+        float p_x = px[i], p_y = py[i], p_z = pz[i];
+        float v_x = vx[i], v_y = vy[i], v_z = vz[i];
+
+        v_x = (v_x + (tx - p_x) * k) * damp;
+        v_y = (v_y + (ty - p_y) * k) * damp;
+        v_z = (v_z + (tz - p_z) * k) * damp;
+
+        px[i] = p_x + v_x * dt;
+        py[i] = p_y + v_y * dt;
+        pz[i] = p_z + v_z * dt;
+
+        vx[i] = v_x;
+        vy[i] = v_y;
+        vz[i] = v_z;
     }
 }
 
@@ -1075,6 +1368,56 @@ EXPORT void vmath_swarm_metal(
     }
 
     // (Scalar tail loop for remainder goes here, though PCOUNT = 10000 is perfectly mod 8)
+    // ========================================================
+    // SCALAR TAIL LOOP (For Safety - Mod 8 remainders)
+    // ========================================================
+    for (; i < count; i++) {
+        float s = seed[i];
+
+        // 1. FAST SPHERICAL MAPPING
+        // _mm256_fnmadd_ps(v_s, 2.0, 1.0) equates to: -(s * 2.0) + 1.0
+        float sz = 1.0f - (s * 2.0f);
+        float rxy = sqrtf(1.0f - (sz * sz));
+        float phi = s * 10000.0f;
+
+        // Standard math is perfectly fine here since it processes 7 particles max!
+        float sx = rxy * cosf(phi); 
+        float sy = rxy * sinf(phi);
+
+        // 2. EVALUATE 4D NOISE
+        // If you wrote a fast_trig_noise_scalar function, call it here!
+        // Otherwise, since this runs on <= 7 particles, a standard inline proxy is virtually free:
+        float noise = sinf(sx * 10.0f + time) * cosf(sy * 10.0f + time) * sinf(sz * 10.0f + time); 
+
+        // 3. APPLY DISPLACEMENT
+        float disp = noise * noise_blend * 3000.0f;
+        float final_r = 4000.0f + disp;
+
+        float tx = cx + sx * final_r;
+        float ty = cy + sy * final_r;
+        float tz = cz + sz * final_r;
+
+        // 4. SPRING PHYSICS
+        float p_x = px[i], p_y = py[i], p_z = pz[i];
+        float v_x = vx[i], v_y = vy[i], v_z = vz[i];
+
+        float k = 4.0f * dt;
+        float damp = 0.92f;
+
+        // v += (target - p) * k * dt; v *= damp;
+        v_x = (v_x + (tx - p_x) * k) * damp;
+        v_y = (v_y + (ty - p_y) * k) * damp;
+        v_z = (v_z + (tz - p_z) * k) * damp;
+
+        // p += v * dt;
+        px[i] = p_x + v_x * dt;
+        py[i] = p_y + v_y * dt;
+        pz[i] = p_z + v_z * dt;
+
+        vx[i] = v_x;
+        vy[i] = v_y;
+        vz[i] = v_z;
+    }
 }
 
 EXPORT void vmath_swarm_smales(
@@ -1166,6 +1509,57 @@ EXPORT void vmath_swarm_smales(
         _mm256_storeu_ps(&vx[i], v_vx);
         _mm256_storeu_ps(&vy[i], v_vy);
         _mm256_storeu_ps(&vz[i], v_vz);
+    }
+    // ========================================================
+    // SCALAR TAIL LOOP (For Safety - Mod 8 remainders)
+    // ========================================================
+    for (; i < count; i++) {
+        float s = seed[i];
+
+        // 1. Map seed to Theta and Phi
+        float theta = s * M_PI;
+        float phi = s * (M_PI * 2.0f * 100.0f);
+
+        float ny = cosf(theta);
+        float sin_theta = sinf(theta);
+
+        float nx = sin_theta * cosf(phi);
+        float nz = sin_theta * sinf(phi);
+
+        // 2. PARADOX MATH
+        float waves = cosf(phi * 4.0f);
+        float twist = sinf(theta * 2.0f);
+
+        float r_corr = 4000.0f * bulge_scalar * waves * twist * 1.2f;
+        float r_main = 4000.0f * eversion_scalar;
+
+        // 3. APPLY DISPLACEMENT
+        float tx = cx + nx * (r_main + r_corr);
+        float tz = cz + nz * (r_main + r_corr);
+
+        float ty_offset = cosf(theta * 3.0f) * 4000.0f * bulge_scalar * 0.5f;
+        float ty = cy + (ny * r_main) + ty_offset;
+
+        // 4. SPRING PHYSICS
+        float p_x = px[i], p_y = py[i], p_z = pz[i];
+        float v_x = vx[i], v_y = vy[i], v_z = vz[i];
+
+        float k = 4.0f * dt;
+        float damp = 0.92f;
+
+        // v += (target - p) * k * dt; v *= damp;
+        v_x = (v_x + (tx - p_x) * k) * damp;
+        v_y = (v_y + (ty - p_y) * k) * damp;
+        v_z = (v_z + (tz - p_z) * k) * damp;
+
+        // p += v * dt;
+        px[i] = p_x + v_x * dt;
+        py[i] = p_y + v_y * dt;
+        pz[i] = p_z + v_z * dt;
+
+        vx[i] = v_x;
+        vy[i] = v_y;
+        vz[i] = v_z;
     }
 }
 // ========================================================================
