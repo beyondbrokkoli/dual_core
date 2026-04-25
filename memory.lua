@@ -70,10 +70,10 @@ AllocateSoA("float[?]", MAX_VERTS, {
 AllocateSoA("bool[?]", MAX_VERTS, {"Vert_Valid"})
 
 -- 5 Triangle Data (Faces, Colors, and Shading Channels)
--- 5 Triangle Data (Faces, Colors, and Shading Channels)
 AllocateSoA("int[?]", MAX_TRIS, {"Tri_V1", "Tri_V2", "Tri_V3"})
 AllocateSoA("float[?]", MAX_TRIS, {"Tri_A", "Tri_R", "Tri_G", "Tri_B", "Tri_MinY", "Tri_MaxY"}) -- <--- ADDED HERE
 AllocateSoA("uint32_t[?]", MAX_TRIS, {"Tri_Color", "Tri_BakedColor"})
+AllocateSoA("float[?]", MAX_TRIS, {"Tri_LNX", "Tri_LNY", "Tri_LNZ"})
 -- Output from C Assembly
 AllocateSoA("bool[?]", MAX_TRIS, { "Tri_Valid" })
 AllocateSoA("uint32_t[?]", MAX_TRIS, { "Tri_ShadedColor" })
@@ -139,6 +139,8 @@ ffi.cdef[[
         int *Tri_V1, *Tri_V2, *Tri_V3;
         uint32_t *Tri_BakedColor, *Tri_ShadedColor; bool *Tri_Valid;
         float *Tri_MinY, *Tri_MaxY;
+
+        float *Tri_LNX, *Tri_LNY, *Tri_LNZ;
 
         float *Swarm_PX[2]; float *Swarm_PY[2]; float *Swarm_PZ[2];
         float *Swarm_VX[2]; float *Swarm_VY[2]; float *Swarm_VZ[2];

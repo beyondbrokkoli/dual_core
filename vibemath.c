@@ -337,7 +337,8 @@ EXPORT void vmath_process_triangles(
     float* px, float* py, float* pz,
     float* lx, float* ly, float* lz,
     uint32_t* baked_color, uint32_t* shaded_color, bool* tri_valid,
-    float* tri_min_y, float* tri_max_y, // <--- NEW PARAMS
+    float* tri_min_y, float* tri_max_y,
+    float* tri_lnx, float* tri_lny, float* tri_lnz, // <--- NEW PARAMS
     float rx, float ry, float rz,
     float ux, float uy, float uz,
     float fx, float fy, float fz,
@@ -414,46 +415,24 @@ EXPORT void vmath_process_triangles(
             continue;
         }
 
-        // 5. Gather Local 3D Coords for survivors
-        __m256 lx1 = _mm256_i32gather_ps(lx, vi1, 4);
-        __m256 ly1 = _mm256_i32gather_ps(ly, vi1, 4);
-        __m256 lz1 = _mm256_i32gather_ps(lz, vi1, 4);
-        __m256 lx2 = _mm256_i32gather_ps(lx, vi2, 4);
-        __m256 ly2 = _mm256_i32gather_ps(ly, vi2, 4);
-        __m256 lz2 = _mm256_i32gather_ps(lz, vi2, 4);
-        __m256 lx3 = _mm256_i32gather_ps(lx, vi3, 4);
-        __m256 ly3 = _mm256_i32gather_ps(ly, vi3, 4);
-        __m256 lz3 = _mm256_i32gather_ps(lz, vi3, 4);
+        // 1. Seqential Load the Pre-Baked Local Normals!
+        // (Goodbye 9 Gather Instructions & Cross Products!)
+        __m256 lnx = _mm256_loadu_ps(&tri_lnx[i]);
+        __m256 lny = _mm256_loadu_ps(&tri_lny[i]);
+        __m256 lnz = _mm256_loadu_ps(&tri_lnz[i]);
 
-        // 6. Calculate Local Normal
-        __m256 ax = _mm256_sub_ps(lx2, lx1);
-        __m256 ay = _mm256_sub_ps(ly2, ly1);
-        __m256 az = _mm256_sub_ps(lz2, lz1);
-        __m256 bx = _mm256_sub_ps(lx3, lx1);
-        __m256 by = _mm256_sub_ps(ly3, ly1);
-        __m256 bz = _mm256_sub_ps(lz3, lz1);
-
-        __m256 lnx = _mm256_sub_ps(_mm256_mul_ps(ay, bz), _mm256_mul_ps(az, by));
-        __m256 lny = _mm256_sub_ps(_mm256_mul_ps(az, bx), _mm256_mul_ps(ax, bz));
-        __m256 lnz = _mm256_sub_ps(_mm256_mul_ps(ax, by), _mm256_mul_ps(ay, bx));
-
-        // 7. Transform to World Normal
+        // 2. Transform to World Normal
         __m256 wnx = _mm256_fmadd_ps(lnz, v_fx, _mm256_fmadd_ps(lny, v_ux, _mm256_mul_ps(lnx, v_rx)));
         __m256 wny = _mm256_fmadd_ps(lnz, v_fy, _mm256_fmadd_ps(lny, v_uy, _mm256_mul_ps(lnx, v_ry)));
         __m256 wnz = _mm256_fmadd_ps(lnz, v_fz, _mm256_fmadd_ps(lny, v_uz, _mm256_mul_ps(lnx, v_rz)));
 
-        // 8. FAST INVERSE SQUARE ROOT
-        __m256 len_sq = _mm256_fmadd_ps(wnz, wnz, _mm256_fmadd_ps(wny, wny, _mm256_mul_ps(wnx, wnx)));
-        len_sq = _mm256_max_ps(len_sq, _mm256_set1_ps(0.000001f)); // Prevent Inf
-        __m256 inv_len = _mm256_rsqrt_ps(len_sq);
+        // [FAST INVERSE SQUARE ROOT COMPLETELY DELETED]
+        // Because the local normal was length 1.0, and rotation preserves length,
+        // wnx, wny, wnz are ALREADY perfectly normalized!
 
-        wnx = _mm256_mul_ps(wnx, inv_len);
-        wny = _mm256_mul_ps(wny, inv_len);
-        wnz = _mm256_mul_ps(wnz, inv_len);
-
-        // 9. Lambertian Lighting (Dot Product)
+        // 3. Lambertian Lighting (Dot Product)
         __m256 dot = _mm256_fmadd_ps(wnz, v_sun_z, _mm256_fmadd_ps(wny, v_sun_y, _mm256_mul_ps(wnx, v_sun_x)));
-        __m256 light = _mm256_max_ps(v_0_2, _mm256_min_ps(dot, v_1_0)); // Clamp 0.2 -> 1.0
+        __m256 light = _mm256_max_ps(v_0_2, _mm256_min_ps(dot, v_1_0));
 
         // 10. Color Decompression & Multiplication
         __m256i orig_col = _mm256_loadu_si256((__m256i*)&baked_color[i]);
@@ -507,17 +486,21 @@ EXPORT void vmath_process_triangles(
         if (cross >= 0) { tri_valid[i] = false; continue; }
 
         uint32_t orig_col = baked_color[i];
-        float ax = lx[i2] - lx[i1], ay = ly[i2] - ly[i1], az = lz[i2] - lz[i1];
-        float bx = lx[i3] - lx[i1], by = ly[i3] - ly[i1], bz = lz[i3] - lz[i1];
 
-        float lnx = ay * bz - az * by, lny = az * bx - ax * bz, lnz = ax * by - ay * bx;
+        // --- [NEW] SCALAR SMART CACHE LIGHTING ---
+        // 1. Load the pre-baked local normals
+        float lnx = tri_lnx[i];
+        float lny = tri_lny[i];
+        float lnz = tri_lnz[i];
+
+        // 2. Transform to World Normal
         float wnx = lnx * rx + lny * ux + lnz * fx;
         float wny = lnx * ry + lny * uy + lnz * fy;
         float wnz = lnx * rz + lny * uz + lnz * fz;
 
-        float inv_len = 1.0f / sqrtf(wnx*wnx + wny*wny + wnz*wnz + 0.000001f);
-        wnx *= inv_len; wny *= inv_len; wnz *= inv_len;
+        // [SQUARE ROOT DELETED] - We are ALREADY normalized!
 
+        // 3. Lambertian Lighting (Dot Product)
         float dot = wnx * sun_x + wny * sun_y + wnz * sun_z;
         float light = dot < 0.2f ? 0.2f : (dot > 1.0f ? 1.0f : dot);
 
@@ -1224,7 +1207,6 @@ EXPORT void vmath_render_batch(
     CameraState* cam, float HALF_W, float HALF_H, float sun_x, float sun_y, float sun_z,
     RenderMemory* mem, uint32_t* ScreenPtr, float* ZBuffer, int CANVAS_W, int CANVAS_H
 ) {
-    // ... [KEEP YOUR EXACT PHASE 1: vmath_project_vertices and vmath_process_triangles loops] ...
     float cpx = cam->x, cpy = cam->y, cpz = cam->z;
     float cfw_x = cam->fwx, cfw_y = cam->fwy, cfw_z = cam->fwz;
     float crt_x = cam->rtx, crt_z = cam->rtz;
@@ -1259,7 +1241,13 @@ EXPORT void vmath_render_batch(
             mem->Tri_V1 + tStart, mem->Tri_V2 + tStart, mem->Tri_V3 + tStart, mem->Vert_Valid,
             mem->Vert_PX, mem->Vert_PY, mem->Vert_PZ, mem->Vert_LX, mem->Vert_LY, mem->Vert_LZ,
             mem->Tri_BakedColor + tStart, mem->Tri_ShadedColor + tStart, mem->Tri_Valid + tStart,
-            mem->Tri_MinY, mem->Tri_MaxY,
+
+            // THE BUG IS DEAD: Added + tStart to the Bounding Boxes
+            mem->Tri_MinY + tStart, mem->Tri_MaxY + tStart,
+
+            // THE NUCLEAR CACHE: Added + tStart to the Pre-Baked Normals
+            mem->Tri_LNX + tStart, mem->Tri_LNY + tStart, mem->Tri_LNZ + tStart,
+
             rx, ry, rz, ux, uy, uz, fx, fy, fz,
             sun_x, sun_y, sun_z
         );
