@@ -90,17 +90,19 @@ AllocateSoA("float[?]", MAX_BOUND_BOXES, {
 })
 AllocateSoA("uint8_t[?]", MAX_BOUND_BOXES, {"BoundBox_Mode"})
 
-AllocateSoA("float[?]", 10000, {
-    "Swarm_PX", "Swarm_PY", "Swarm_PZ",
-    "Swarm_VX", "Swarm_VY", "Swarm_VZ",
-    "Swarm_Seed"
-})
-
 -- 7. The Command Queue (For C-Backend Dispatch)
 AllocateSoA("int[?]", 64, {"CommandQueue"})
 
-AllocateSoA("int[?]", 10000, {"Swarm_Indices", "Swarm_TempIndices"})
-AllocateSoA("float[?]", 10000, {"Swarm_Distances", "Swarm_TempDistances"})
+-- 8. The Dual-Core Swarm Arrays (Safely anchored in Memory.Arrays!)
+AllocateSoA("float[?]", 10000, {
+    "Swarm_PX_0", "Swarm_PX_1", "Swarm_PY_0", "Swarm_PY_1", "Swarm_PZ_0", "Swarm_PZ_1",
+    "Swarm_VX_0", "Swarm_VX_1", "Swarm_VY_0", "Swarm_VY_1", "Swarm_VZ_0", "Swarm_VZ_1",
+    "Swarm_Seed", "Swarm_Distances", "Swarm_TempDistances"
+})
+AllocateSoA("int[?]", 10000, {
+    "Swarm_Indices_0", "Swarm_Indices_1", "Swarm_TempIndices"
+})
+
 
 -- ==========================================
 -- [4] GLOBAL SINGLETONS & STRUCTS
@@ -211,26 +213,33 @@ end
 Memory.RenderStruct = ffi.new("RenderMemory")
 
 -- ========================================================================
--- [6] THE DUAL-CORE BUFFER ALLOCATION
+-- [5] THE DUAL-CORE STRUCT BINDING
 -- ========================================================================
--- We manually allocate the Ping-Pong buffers directly into the C-Struct
-for i = 0, 1 do
-    Memory.RenderStruct.Swarm_PX[i] = ffi.new("float[?]", 10000)
-    Memory.RenderStruct.Swarm_PY[i] = ffi.new("float[?]", 10000)
-    Memory.RenderStruct.Swarm_PZ[i] = ffi.new("float[?]", 10000)
-    Memory.RenderStruct.Swarm_VX[i] = ffi.new("float[?]", 10000)
-    Memory.RenderStruct.Swarm_VY[i] = ffi.new("float[?]", 10000)
-    Memory.RenderStruct.Swarm_VZ[i] = ffi.new("float[?]", 10000)
-    Memory.RenderStruct.Swarm_Indices[i] = ffi.new("int[?]", 10000)
-end
+-- First, manually bind the Ping-Pong arrays into the C-Struct arrays
+Memory.RenderStruct.Swarm_PX[0] = Memory.Arrays.Swarm_PX_0
+Memory.RenderStruct.Swarm_PX[1] = Memory.Arrays.Swarm_PX_1
+Memory.RenderStruct.Swarm_PY[0] = Memory.Arrays.Swarm_PY_0
+Memory.RenderStruct.Swarm_PY[1] = Memory.Arrays.Swarm_PY_1
+Memory.RenderStruct.Swarm_PZ[0] = Memory.Arrays.Swarm_PZ_0
+Memory.RenderStruct.Swarm_PZ[1] = Memory.Arrays.Swarm_PZ_1
+
+Memory.RenderStruct.Swarm_VX[0] = Memory.Arrays.Swarm_VX_0
+Memory.RenderStruct.Swarm_VX[1] = Memory.Arrays.Swarm_VX_1
+Memory.RenderStruct.Swarm_VY[0] = Memory.Arrays.Swarm_VY_0
+Memory.RenderStruct.Swarm_VY[1] = Memory.Arrays.Swarm_VY_1
+Memory.RenderStruct.Swarm_VZ[0] = Memory.Arrays.Swarm_VZ_0
+Memory.RenderStruct.Swarm_VZ[1] = Memory.Arrays.Swarm_VZ_1
+
+Memory.RenderStruct.Swarm_Indices[0] = Memory.Arrays.Swarm_Indices_0
+Memory.RenderStruct.Swarm_Indices[1] = Memory.Arrays.Swarm_Indices_1
 
 -- ========================================================================
--- [7] THE AUTOMATIC STRUCT BINDING
+-- [6] THE AUTOMATIC STRUCT BINDING
 -- ========================================================================
--- Automatically map all the standard Lua FFI arrays (created via AllocateSoA) to the C-Struct!
+-- Now let your pcall loop safely bind all the remaining single-arrays!
 for array_name, array_ptr in pairs(Memory.Arrays) do
-    -- pcall protects us in case an array isn't in the Render struct
     pcall(function() Memory.RenderStruct[array_name] = array_ptr end)
 end
 
 return Memory
+
