@@ -1724,7 +1724,9 @@ EXPORT void vmath_swarm_sort_depth(
 ) {
     // 1. Calculate Squared Distances using AVX2
     __m256 v_cx = _mm256_set1_ps(cx), v_cy = _mm256_set1_ps(cy), v_cz = _mm256_set1_ps(cz);
-    for(int i = 0; i <= count - 8; i += 8) {
+
+    int i = 0; // The lifesaver variable!
+    for(; i <= count - 8; i += 8) {
         __m256 dx = _mm256_sub_ps(_mm256_loadu_ps(&px[i]), v_cx);
         __m256 dy = _mm256_sub_ps(_mm256_loadu_ps(&py[i]), v_cy);
         __m256 dz = _mm256_sub_ps(_mm256_loadu_ps(&pz[i]), v_cz);
@@ -1732,8 +1734,18 @@ EXPORT void vmath_swarm_sort_depth(
         _mm256_storeu_ps(&distances[i], dist2);
     }
 
-    // Initialize base indices
-    for(int i = 0; i < count; i++) indices[i] = i;
+    // ========================================================
+    // SCALAR TAIL LOOP (For Safety - Mod 8 remainders)
+    // ========================================================
+    for (; i < count; i++) {
+        float dx = px[i] - cx;
+        float dy = py[i] - cy;
+        float dz = pz[i] - cz;
+        distances[i] = dx * dx + dy * dy + dz * dz;
+    }
+
+    // Initialize base indices (Using 'j' to avoid shadowing our 'i' variable)
+    for(int j = 0; j < count; j++) indices[j] = j;
 
     // 2. The 8-bit Radix Sort (4 passes for 32-bit keys)
     // IEEE-754 positive floats can be sorted directly by their integer bit representations!
@@ -1746,25 +1758,25 @@ EXPORT void vmath_swarm_sort_depth(
         int counts[256] = {0};
 
         // Count frequencies
-        for (int i = 0; i < count; i++) {
-            uint32_t key = ((uint32_t*)src_val)[i];
+        for (int j = 0; j < count; j++) {
+            uint32_t key = ((uint32_t*)src_val)[j];
             counts[(key >> shift) & 0xFF]++;
         }
 
         // Calculate offsets
         int offsets[256];
         offsets[0] = 0;
-        for (int i = 1; i < 256; i++) {
-            offsets[i] = offsets[i - 1] + counts[i - 1];
+        for (int j = 1; j < 256; j++) {
+            offsets[j] = offsets[j - 1] + counts[j - 1];
         }
 
         // Scatter
-        for (int i = 0; i < count; i++) {
-            uint32_t key = ((uint32_t*)src_val)[i];
+        for (int j = 0; j < count; j++) {
+            uint32_t key = ((uint32_t*)src_val)[j];
             int bucket = (key >> shift) & 0xFF;
             int dest = offsets[bucket]++;
-            dst_val[dest] = src_val[i];
-            dst_idx[dest] = src_idx[i];
+            dst_val[dest] = src_val[j];
+            dst_idx[dest] = src_idx[j];
         }
 
         // Swap buffers
@@ -1773,7 +1785,6 @@ EXPORT void vmath_swarm_sort_depth(
     }
     // Because we do exactly 4 passes, the pointers swap perfectly back to their original arrays!
 }
-
 // ========================================================
 // CORE 2: PHYSICS WORKER
 // ========================================================
