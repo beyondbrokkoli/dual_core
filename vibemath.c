@@ -485,14 +485,14 @@ EXPORT void vmath_process_triangles(
         tri_valid[i] = true;
     }
 }
-
 EXPORT void vmath_rasterize_triangles(
     int tCount,
     int* v1, int* v2, int* v3, bool* tri_valid,
     float* px, float* py, float* pz,
     uint32_t* shaded_color,
     uint32_t* screen_buffer, float* z_buffer,
-    int canvas_w, int canvas_h
+    int canvas_w, int canvas_h,
+    int min_clip_y, int max_clip_y // <--- [NEW PARAMETERS]
 ) {
     for (int i = 0; i < tCount; i++) {
         if (!tri_valid[i]) continue;
@@ -512,19 +512,26 @@ EXPORT void vmath_rasterize_triangles(
         float total_height = y3 - y1;
         if (total_height <= 0.0f) continue;
 
+        // --- [NEW THE Y-CLIP LOGIC] ---
+        int y_start = (int)fmaxf((float)min_clip_y, ceilf(y1));
+        int y_end   = (int)fminf((float)max_clip_y, floorf(y3));
+
+        // If the entire triangle is outside this core's designated screen half, skip it entirely!
+        if (y_start > y_end) continue; 
+        
         float inv_total = 1.0f / total_height;
-        int y_start = (int)fmaxf(0.0f, ceilf(y1));
-        int y_end   = (int)fminf((float)(canvas_h - 1), floorf(y3));
 
         // ==========================================
-        // UPPER TRIANGLE
+        // UPPER TRIANGLE (Keep the exact same math, just limit the Y loop!)
         // ==========================================
         float dy_upper = y2 - y1;
         if (dy_upper > 0.0f) {
             float inv_upper = 1.0f / dy_upper;
-            int limit_y = (int)fminf((float)y_end, floorf(y2));
+            // Ensure we don't draw past the thread's max_clip_y, even if the triangle continues
+            int limit_y = (int)fminf((float)y_end, floorf(y2)); 
 
             for (int y = y_start; y <= limit_y; y++) {
+                // ... [Keep your exact horizontal AVX2 row rendering loop here!] ...
                 float t_total = (y - y1) * inv_total;
                 float t_half  = (y - y1) * inv_upper;
                 float ax = x1 + (x3 - x1) * t_total, az = z1 + (z3 - z1) * t_total;
@@ -574,16 +581,17 @@ EXPORT void vmath_rasterize_triangles(
                 }
             }
         }
-
         // ==========================================
         // LOWER TRIANGLE
         // ==========================================
         float dy_lower = y3 - y2;
         if (dy_lower > 0.0f) {
             float inv_lower = 1.0f / dy_lower;
+            // Ensure we don't start drawing before the thread's min_clip_y!
             int start_y = (int)fmaxf((float)y_start, ceilf(y2));
 
             for (int y = start_y; y <= y_end; y++) {
+                // ... [Keep your exact horizontal AVX2 row rendering loop here!] ...
                 float t_total = (y - y1) * inv_total;
                 float t_half  = (y - y2) * inv_lower;
                 float ax = x1 + (x3 - x1) * t_total, az = z1 + (z3 - z1) * t_total;
