@@ -147,8 +147,6 @@ ffi.cdef[[
         float Swarm_GravityBlend;
         float Swarm_MetalBlend;
         float Swarm_ParadoxBlend;
-        bool Swarm_Explode1;
-        bool Swarm_Explode2;
 
         int *Swarm_TempIndices;
         float *Swarm_Distances;

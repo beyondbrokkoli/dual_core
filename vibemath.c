@@ -146,9 +146,6 @@ typedef struct {
     float Swarm_GravityBlend;
     float Swarm_MetalBlend;
     float Swarm_ParadoxBlend;
-    bool Swarm_Explode1;
-    bool Swarm_Explode2;
-    // --- [NEW] DEPTH SORTING ARRAYS ---
 
     int *Swarm_TempIndices;
     float *Swarm_Distances;

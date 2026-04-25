@@ -94,8 +94,6 @@ return function()
         mem.Swarm_GravityBlend = gravity_blend
         mem.Swarm_MetalBlend = metal_blend
         mem.Swarm_ParadoxBlend = paradox_blend
-        mem.Swarm_Explode1 = love.mouse.isDown(1)
-        mem.Swarm_Explode2 = love.mouse.isDown(2)
     end
 
     return Swarm
