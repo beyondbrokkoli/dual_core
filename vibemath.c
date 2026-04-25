@@ -1367,7 +1367,6 @@ EXPORT void vmath_swarm_metal(
         _mm256_storeu_ps(&vz[i], v_vz);
     }
 
-    // (Scalar tail loop for remainder goes here, though PCOUNT = 10000 is perfectly mod 8)
     // ========================================================
     // SCALAR TAIL LOOP (For Safety - Mod 8 remainders)
     // ========================================================
@@ -1806,48 +1805,49 @@ THREAD_FUNC vmath_physics_worker(void* arg) {
             // ... [KEEP YOUR EXACT PHYSICS SWITCH STATEMENT HERE] ...
             int opcode = p->queue[i];
 
+            int swarm_count = mem->Obj_VertCount[0] / 4; // Replacing hardcoded object count with hardcoded vertex count (4)
             switch (opcode) {
                 case 2: // SWARM_APPLY_BASE_PHYSICS (The Bridge: Reads from R, Writes to W)
-                    vmath_swarm_update_velocities(10000, 
+                    vmath_swarm_update_velocities(swarm_count,
                     mem->Swarm_PX[r], mem->Swarm_PY[r], mem->Swarm_PZ[r], mem->Swarm_VX[r], mem->Swarm_VY[r], mem->Swarm_VZ[r],
                     mem->Swarm_PX[w], mem->Swarm_PY[w], mem->Swarm_PZ[w], mem->Swarm_VX[w], mem->Swarm_VY[w], mem->Swarm_VZ[w],
                     -15000, 15000, -4000, 15000, -15000, 15000, dt, -8000.0f * mem->Swarm_GravityBlend);
                     break;
 
                 case 3: // SWARM_BUNDLE (State 1) - Everything else modifies W!
-                    vmath_swarm_bundle(10000, mem->Swarm_PX[w], mem->Swarm_PY[w], mem->Swarm_PZ[w], mem->Swarm_VX[w], mem->Swarm_VY[w], mem->Swarm_VZ[w], mem->Swarm_Seed, 0, 5000, 0, time, dt);
+                    vmath_swarm_bundle(swarm_count, mem->Swarm_PX[w], mem->Swarm_PY[w], mem->Swarm_PZ[w], mem->Swarm_VX[w], mem->Swarm_VY[w], mem->Swarm_VZ[w], mem->Swarm_Seed, 0, 5000, 0, time, dt);
                     break;
 
                 case 4: // SWARM_GALAXY (State 2)
-                    vmath_swarm_galaxy(10000, mem->Swarm_PX[w], mem->Swarm_PY[w], mem->Swarm_PZ[w], mem->Swarm_VX[w], mem->Swarm_VY[w], mem->Swarm_VZ[w], mem->Swarm_Seed, 0, 5000, 0, time, dt);
+                    vmath_swarm_galaxy(swarm_count, mem->Swarm_PX[w], mem->Swarm_PY[w], mem->Swarm_PZ[w], mem->Swarm_VX[w], mem->Swarm_VY[w], mem->Swarm_VZ[w], mem->Swarm_Seed, 0, 5000, 0, time, dt);
                     break;
 
                 case 5: // SWARM_TORNADO (State 3)
-                    vmath_swarm_tornado(10000, mem->Swarm_PX[w], mem->Swarm_PY[w], mem->Swarm_PZ[w], mem->Swarm_VX[w], mem->Swarm_VY[w], mem->Swarm_VZ[w], mem->Swarm_Seed, 0, 5000, 0, time, dt);
+                    vmath_swarm_tornado(swarm_count, mem->Swarm_PX[w], mem->Swarm_PY[w], mem->Swarm_PZ[w], mem->Swarm_VX[w], mem->Swarm_VY[w], mem->Swarm_VZ[w], mem->Swarm_Seed, 0, 5000, 0, time, dt);
                     break;
 
                 case 6: // SWARM_GYROSCOPE (State 4)
-                    vmath_swarm_gyroscope(10000, mem->Swarm_PX[w], mem->Swarm_PY[w], mem->Swarm_PZ[w], mem->Swarm_VX[w], mem->Swarm_VY[w], mem->Swarm_VZ[w], mem->Swarm_Seed, 0, 5000, 0, time, dt);
+                    vmath_swarm_gyroscope(swarm_count, mem->Swarm_PX[w], mem->Swarm_PY[w], mem->Swarm_PZ[w], mem->Swarm_VX[w], mem->Swarm_VY[w], mem->Swarm_VZ[w], mem->Swarm_Seed, 0, 5000, 0, time, dt);
                     break;
 
                 case 7: // SWARM_METAL (State 5)
-                    vmath_swarm_metal(10000, mem->Swarm_PX[w], mem->Swarm_PY[w], mem->Swarm_PZ[w], mem->Swarm_VX[w], mem->Swarm_VY[w], mem->Swarm_VZ[w], mem->Swarm_Seed, 0, 5000, 0, time, dt, mem->Swarm_MetalBlend);
+                    vmath_swarm_metal(swarm_count, mem->Swarm_PX[w], mem->Swarm_PY[w], mem->Swarm_PZ[w], mem->Swarm_VX[w], mem->Swarm_VY[w], mem->Swarm_VZ[w], mem->Swarm_Seed, 0, 5000, 0, time, dt, mem->Swarm_MetalBlend);
                     break;
 
                 case 8: // SWARM_PARADOX (State 6)
-                    vmath_swarm_smales(10000, mem->Swarm_PX[w], mem->Swarm_PY[w], mem->Swarm_PZ[w], mem->Swarm_VX[w], mem->Swarm_VY[w], mem->Swarm_VZ[w], mem->Swarm_Seed, 0, 5000, 0, time, dt, mem->Swarm_ParadoxBlend);
+                    vmath_swarm_smales(swarm_count, mem->Swarm_PX[w], mem->Swarm_PY[w], mem->Swarm_PZ[w], mem->Swarm_VX[w], mem->Swarm_VY[w], mem->Swarm_VZ[w], mem->Swarm_Seed, 0, 5000, 0, time, dt, mem->Swarm_ParadoxBlend);
                     break;
 
                 case 12: // SWARM_EXPLOSION_PUSH
-                    vmath_swarm_apply_explosion(10000, mem->Swarm_PX[w], mem->Swarm_PY[w], mem->Swarm_PZ[w], mem->Swarm_VX[w], mem->Swarm_VY[w], mem->Swarm_VZ[w], 0, 5000, 0, 5000000.0f * dt, 15000.0f);
+                    vmath_swarm_apply_explosion(swarm_count, mem->Swarm_PX[w], mem->Swarm_PY[w], mem->Swarm_PZ[w], mem->Swarm_VX[w], mem->Swarm_VY[w], mem->Swarm_VZ[w], 0, 5000, 0, 5000000.0f * dt, 15000.0f);
                     break;
 
                 case 13: // SWARM_EXPLOSION_PULL
-                    vmath_swarm_apply_explosion(10000, mem->Swarm_PX[w], mem->Swarm_PY[w], mem->Swarm_PZ[w], mem->Swarm_VX[w], mem->Swarm_VY[w], mem->Swarm_VZ[w], 0, 5000, 0, -4000000.0f * dt, 20000.0f);
+                    vmath_swarm_apply_explosion(swarm_count, mem->Swarm_PX[w], mem->Swarm_PY[w], mem->Swarm_PZ[w], mem->Swarm_VX[w], mem->Swarm_VY[w], mem->Swarm_VZ[w], 0, 5000, 0, -4000000.0f * dt, 20000.0f);
                     break;
 
                 case 14: // SWARM_SORT_DEPTH
-                    vmath_swarm_sort_depth(10000, mem->Swarm_PX[w], mem->Swarm_PY[w], mem->Swarm_PZ[w], mem->Swarm_Indices[w], mem->Swarm_TempIndices, mem->Swarm_Distances, mem->Swarm_TempDistances, 0, 0, 0); // Note: Assuming camera is near 0,0,0 for now
+                    vmath_swarm_sort_depth(swarm_count, mem->Swarm_PX[w], mem->Swarm_PY[w], mem->Swarm_PZ[w], mem->Swarm_Indices[w], mem->Swarm_TempIndices, mem->Swarm_Distances, mem->Swarm_TempDistances, 0, 0, 0); // Note: Assuming camera is near 0,0,0 for now
                     break;
             }
         }
@@ -1891,13 +1891,14 @@ EXPORT void vmath_execute_queue(
     for (int i = 0; i < command_count; i++) {
         int opcode = queue[i];
 
+        int swarm_count = mem->Obj_VertCount[0] / 4; // same here, vertex count must be 4 per particle
         switch (opcode) {
             case 1: // CMD_CLEAR
                 vmath_clear_buffers(ScreenPtr, ZBuffer, 0xFF000000, 99999.0f, CANVAS_W * CANVAS_H);
                 break;
 
             case 9: // SWARM_GEN_QUADS (Reads from R)
-                vmath_swarm_generate_quads(10000, mem->Swarm_PX[read_idx], mem->Swarm_PY[read_idx], mem->Swarm_PZ[read_idx], mem->Vert_LX + mem->Obj_VertStart[0], mem->Vert_LY + mem->Obj_VertStart[0], mem->Vert_LZ + mem->Obj_VertStart[0], 120.0f, cam, HALF_W, HALF_H, mem->Swarm_Indices[read_idx]);
+                vmath_swarm_generate_quads(swarm_count, mem->Swarm_PX[read_idx], mem->Swarm_PY[read_idx], mem->Swarm_PZ[read_idx], mem->Vert_LX + mem->Obj_VertStart[0], mem->Vert_LY + mem->Obj_VertStart[0], mem->Vert_LZ + mem->Obj_VertStart[0], 120.0f, cam, HALF_W, HALF_H, mem->Swarm_Indices[read_idx]);
                 break;
 
             case 10: // SPHERE_TICK
@@ -1905,7 +1906,7 @@ EXPORT void vmath_execute_queue(
                 break;
 
             case 11: { // RENDER_CULL
-                int id = queue[++i]; 
+                int id = queue[++i];
                 vmath_render_batch(id, id, cam, HALF_W, HALF_H, sun_x, sun_y, sun_z, mem, ScreenPtr, ZBuffer, CANVAS_W, CANVAS_H);
                 break;
             }

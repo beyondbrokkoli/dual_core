@@ -9,7 +9,7 @@ local Memory = {
 -- ==========================================
 -- [1] THE UNIVERSE BOUNDARIES (Static Limits)
 -- ==========================================
-MAX_OBJS = 10000
+MAX_OBJS = 20000
 MAX_VERTS = 1500000 -- Raised from 500k
 MAX_TRIS = 2500000  -- Raised from 1 Million
 
@@ -95,12 +95,12 @@ AllocateSoA("uint8_t[?]", MAX_BOUND_BOXES, {"BoundBox_Mode"})
 AllocateSoA("int[?]", 64, {"CommandQueue"})
 
 -- 8. The Dual-Core Swarm Arrays (Safely anchored in Memory.Arrays!)
-AllocateSoA("float[?]", 10000, {
+AllocateSoA("float[?]", MAX_OBJS, {
     "Swarm_PX_0", "Swarm_PX_1", "Swarm_PY_0", "Swarm_PY_1", "Swarm_PZ_0", "Swarm_PZ_1",
     "Swarm_VX_0", "Swarm_VX_1", "Swarm_VY_0", "Swarm_VY_1", "Swarm_VZ_0", "Swarm_VZ_1",
     "Swarm_Seed", "Swarm_Distances", "Swarm_TempDistances"
 })
-AllocateSoA("int[?]", 10000, {
+AllocateSoA("int[?]", MAX_OBJS, {
     "Swarm_Indices_0", "Swarm_Indices_1", "Swarm_TempIndices"
 })
 
