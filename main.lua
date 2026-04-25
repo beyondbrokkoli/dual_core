@@ -118,3 +118,9 @@ function love.keypressed(key)
 end
 function love.mousemoved(x, y, dx, dy) Sequence.RunPhase("MouseMoved", x, y, dx, dy) end
 function love.mousepressed(x, y, button) if not love.mouse.getRelativeMode() then love.mouse.setRelativeMode(true) end end
+function love.quit()
+    print("[SYSTEM] Initiating Graceful Dual-Core Shutdown...")
+    VibeMath.vmath_shutdown_thread_pool()
+    print("[SYSTEM] Threads terminated. Goodbye.")
+    return false -- Tells Love2D to proceed with the normal closing process
+end

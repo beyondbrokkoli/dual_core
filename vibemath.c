@@ -1531,3 +1531,14 @@ EXPORT void vmath_init_thread_pool() {
     g_raster_top_thread = vmath_thread_start(vmath_raster_worker, (void*)(intptr_t)0);
     g_raster_bot_thread = vmath_thread_start(vmath_raster_worker, (void*)(intptr_t)1);
 }
+EXPORT void vmath_shutdown_thread_pool() {
+    // 1. Send the QUIT signal (2) to all infinite loops
+    atomic_store(&g_phys_sig, 2);
+    atomic_store(&g_top_sig, 2);
+    atomic_store(&g_bot_sig, 2);
+
+    // 2. Wait for the threads to actually exit their functions safely
+    vmath_thread_join(g_physics_thread);
+    vmath_thread_join(g_raster_top_thread);
+    vmath_thread_join(g_raster_bot_thread);
+}

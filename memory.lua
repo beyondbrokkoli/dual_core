@@ -165,6 +165,7 @@ ffi.cdef[[
         int read_idx, int write_idx //
     );
     void vmath_init_thread_pool();
+    void vmath_shutdown_thread_pool();
 ]]
 
 UniverseCage = ffi.new("GlobalCage", {-15000, -4000, -15000, 15000, 15000, 15000, true})
