@@ -167,10 +167,14 @@ typedef struct {
 PhysicsThreadPayload g_physics_payload;
 vmath_thread_t g_physics_thread;
 
-// --- [NEW] QUAD-CORE THREADING PAYLOADS ---
+// --- [NEW] DISPLAY LIST BUCKETS ---
+#define MAX_DISP_TRIS 500000 // 2 Megabytes of RAM per list, perfectly safe
+int g_TopList[MAX_DISP_TRIS];
+int g_BotList[MAX_DISP_TRIS];
+
 typedef struct {
-    int start_id;
-    int end_id;
+    int* display_list;  // <-- Now it takes a specific list of triangles!
+    int list_count;     // <-- How many are in this list
     RenderMemory* mem;
     uint32_t* ScreenPtr;
     float* ZBuffer;
@@ -503,55 +507,42 @@ EXPORT void vmath_process_triangles(
         tri_valid[i] = true;
     }
 }
-EXPORT void vmath_rasterize_triangles(
-    int tCount,
-    int* v1, int* v2, int* v3, bool* tri_valid,
+EXPORT void vmath_rasterize_list(
+    int* display_list, int list_count,
+    int* v1, int* v2, int* v3, 
     float* px, float* py, float* pz,
     uint32_t* shaded_color,
     uint32_t* screen_buffer, float* z_buffer,
     int canvas_w, int canvas_h,
-    int min_clip_y, int max_clip_y // <--- [NEW PARAMETERS]
+    int min_clip_y, int max_clip_y
 ) {
-
-
-for (int i = 0; i < tCount; i++) {
-        if (!tri_valid[i]) continue;
+    for (int k = 0; k < list_count; k++) {
+        // [SMART CACHE]: Fetch the exact Triangle ID from the bin!
+        int i = display_list[k]; 
 
         int i1 = v1[i], i2 = v2[i], i3 = v3[i];
-        
-        // 1. ONLY fetch Y first
-        float y1 = py[i1], y2 = py[i2], y3 = py[i3];
-
-        // --- [NEW] FAST Y-REJECT ---
-        // If all 3 vertices are completely above or completely below this thread's clip zone, skip EVERYTHING!
-        if (y1 < min_clip_y && y2 < min_clip_y && y3 < min_clip_y) continue;
-        if (y1 > max_clip_y && y2 > max_clip_y && y3 > max_clip_y) continue;
-
-        // 2. Now it is safe to fetch X, Z, and Color
-        float x1 = px[i1], z1 = pz[i1];
-        float x2 = px[i2], z2 = pz[i2];
-        float x3 = px[i3], z3 = pz[i3];
+        float x1 = px[i1], y1 = py[i1], z1 = pz[i1];
+        float x2 = px[i2], y2 = py[i2], z2 = pz[i2];
+        float x3 = px[i3], y3 = py[i3], z3 = pz[i3];
 
         __m256i v_color = _mm256_set1_epi32((int)shaded_color[i]);
 
-        // 3. Sort the vertices
         if (y1 > y2) { float t=x1; x1=x2; x2=t;  t=y1; y1=y2; y2=t;  t=z1; z1=z2; z2=t; }
         if (y1 > y3) { float t=x1; x1=x3; x3=t;  t=y1; y1=y3; y3=t;  t=z1; z1=z3; z3=t; }
         if (y2 > y3) { float t=x2; x2=x3; x3=t;  t=y2; y2=y3; y3=t;  t=z2; z2=z3; z3=t; }
 
-        // ... [Rest of your rasterizer] ...
         float total_height = y3 - y1;
         if (total_height <= 0.0f) continue;
 
-        // --- [NEW THE Y-CLIP LOGIC] ---
         int y_start = (int)fmaxf((float)min_clip_y, ceilf(y1));
         int y_end   = (int)fminf((float)max_clip_y, floorf(y3));
 
-        // If the entire triangle is outside this core's designated screen half, skip it entirely!
-        if (y_start > y_end) continue;
-
+        if (y_start > y_end) continue; 
+        
         float inv_total = 1.0f / total_height;
 
+        // ... [KEEP YOUR EXACT UPPER AND LOWER TRIANGLE LOOPS HERE] ...
+        // (Just the y_start / y_end loops, exactly as they are)
         // ==========================================
         // UPPER TRIANGLE (Keep the exact same math, just limit the Y loop!)
         // ==========================================
@@ -1181,34 +1172,24 @@ THREAD_FUNC vmath_raster_worker(void* arg) {
     RasterThreadPayload* p = (RasterThreadPayload*)arg;
     RenderMemory* mem = p->mem;
 
-    for (int id = p->start_id; id <= p->end_id; id++) {
-        // We still check the basic Z-Cull so we don't draw things behind us
-        float r = mem->Obj_Radius[id];
-        // Note: For absolute perfection we'd pass cz_center in, but we can safely skip the 
-        // coarse cull here because project_vertices already marked invisible tris as 'false' in Tri_Valid!
+    // Pass the absolute base memory pointers and the display list
+    vmath_rasterize_list(
+        p->display_list, p->list_count,
+        mem->Tri_V1, mem->Tri_V2, mem->Tri_V3,
+        mem->Vert_PX, mem->Vert_PY, mem->Vert_PZ, 
+        mem->Tri_ShadedColor,
+        p->ScreenPtr, p->ZBuffer, p->CANVAS_W, p->CANVAS_H,
+        p->min_clip_y, p->max_clip_y
+    );
 
-        int tStart = mem->Obj_TriStart[id];
-        int tCount = mem->Obj_TriCount[id];
-
-        vmath_rasterize_triangles(
-            tCount,
-            mem->Tri_V1 + tStart, mem->Tri_V2 + tStart, mem->Tri_V3 + tStart, mem->Tri_Valid + tStart,
-            mem->Vert_PX, mem->Vert_PY, mem->Vert_PZ, mem->Tri_ShadedColor + tStart,
-            p->ScreenPtr, p->ZBuffer, p->CANVAS_W, p->CANVAS_H,
-            p->min_clip_y, p->max_clip_y  // <-- The magical clipping boundaries
-        );
-    }
     return THREAD_RETURN_VAL;
 }
-
 EXPORT void vmath_render_batch(
     int start_id, int end_id,
-    CameraState* cam,
-    float HALF_W, float HALF_H,
-    float sun_x, float sun_y, float sun_z,
-    RenderMemory* mem,
-    uint32_t* ScreenPtr, float* ZBuffer, int CANVAS_W, int CANVAS_H
+    CameraState* cam, float HALF_W, float HALF_H, float sun_x, float sun_y, float sun_z,
+    RenderMemory* mem, uint32_t* ScreenPtr, float* ZBuffer, int CANVAS_W, int CANVAS_H
 ) {
+    // ... [KEEP YOUR EXACT PHASE 1: vmath_project_vertices and vmath_process_triangles loops] ...
     float cpx = cam->x, cpy = cam->y, cpz = cam->z;
     float cfw_x = cam->fwx, cfw_y = cam->fwy, cfw_z = cam->fwz;
     float crt_x = cam->rtx, crt_z = cam->rtz;
@@ -1247,35 +1228,62 @@ EXPORT void vmath_render_batch(
             sun_x, sun_y, sun_z
         );
     }
-
-    // --- PHASE 2: DISPATCH CORE 3 AND CORE 4 (RASTERIZATION) ---
+    // --- PHASE 1.5: THE SMART CACHE BINNER ---
+    int top_count = 0;
+    int bot_count = 0;
     int mid_y = CANVAS_H / 2;
 
+    for (int id = start_id; id <= end_id; id++) {
+        int tStart = mem->Obj_TriStart[id];
+        int tCount = mem->Obj_TriCount[id];
+
+        for (int i = 0; i < tCount; i++) {
+            int abs_i = tStart + i; // Absolute Triangle ID
+
+            // If lighting or backface culling killed it, completely ignore it!
+            if (!mem->Tri_Valid[abs_i]) continue;
+
+            // Fetch the Y coordinates of the 3 vertices
+            float y1 = mem->Vert_PY[mem->Tri_V1[abs_i]];
+            float y2 = mem->Vert_PY[mem->Tri_V2[abs_i]];
+            float y3 = mem->Vert_PY[mem->Tri_V3[abs_i]];
+
+            // Find triangle bounds
+            float min_y = y1 < y2 ? (y1 < y3 ? y1 : y3) : (y2 < y3 ? y2 : y3);
+            float max_y = y1 > y2 ? (y1 > y3 ? y1 : y3) : (y2 > y3 ? y2 : y3);
+
+            // Bin them! (If a triangle crosses the middle line, it gets put in BOTH lists!)
+            if (min_y < mid_y) {
+                g_TopList[top_count++] = abs_i;
+            }
+            if (max_y >= mid_y) {
+                g_BotList[bot_count++] = abs_i;
+            }
+        }
+    }
+
+    // --- PHASE 2: DISPATCH CORE 3 AND CORE 4 (RASTERIZATION) ---
     // Setup Top Half Payload
-    g_raster_top_payload.start_id = start_id; g_raster_top_payload.end_id = end_id;
+    g_raster_top_payload.display_list = g_TopList;
+    g_raster_top_payload.list_count = top_count;
     g_raster_top_payload.mem = mem; g_raster_top_payload.ScreenPtr = ScreenPtr; g_raster_top_payload.ZBuffer = ZBuffer;
     g_raster_top_payload.CANVAS_W = CANVAS_W; g_raster_top_payload.CANVAS_H = CANVAS_H;
-    g_raster_top_payload.min_clip_y = 0; 
-    g_raster_top_payload.max_clip_y = mid_y - 1;
+    g_raster_top_payload.min_clip_y = 0; g_raster_top_payload.max_clip_y = mid_y - 1;
 
     // Setup Bottom Half Payload
-    g_raster_bot_payload.start_id = start_id; g_raster_bot_payload.end_id = end_id;
+    g_raster_bot_payload.display_list = g_BotList;
+    g_raster_bot_payload.list_count = bot_count;
     g_raster_bot_payload.mem = mem; g_raster_bot_payload.ScreenPtr = ScreenPtr; g_raster_bot_payload.ZBuffer = ZBuffer;
     g_raster_bot_payload.CANVAS_W = CANVAS_W; g_raster_bot_payload.CANVAS_H = CANVAS_H;
-    g_raster_bot_payload.min_clip_y = mid_y; 
-    g_raster_bot_payload.max_clip_y = CANVAS_H - 1;
+    g_raster_bot_payload.min_clip_y = mid_y; g_raster_bot_payload.max_clip_y = CANVAS_H - 1;
 
     // FIRE THE THREADS!
     g_raster_top_thread = vmath_thread_start(vmath_raster_worker, &g_raster_top_payload);
     g_raster_bot_thread = vmath_thread_start(vmath_raster_worker, &g_raster_bot_payload);
 
-    // Main thread waits for both to finish drawing before returning to Lua
     vmath_thread_join(g_raster_top_thread);
     vmath_thread_join(g_raster_bot_thread);
 }
-// ========================================================================
-// TESTBED
-// ========================================================================
 
 // A dead-simple scalar sphere. No noise, no SIMD, purely a stable target for our Transition Weaving tests.
 EXPORT void vmath_generate_basic_sphere(float* lx, float* ly, float* lz, int latitudes, int longitudes, float radius) {
