@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <math.h>
+#include <stdatomic.h>
 
 #ifdef _WIN32
     #define EXPORT __declspec(dllexport)
@@ -12,6 +13,15 @@
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
 #endif
+
+// ========================================================
+// THE ATOMIC SPIN-LOCK THREAD POOL
+// ========================================================
+// Signals: 0 = Sleep, 1 = Work, 2 = Quit
+atomic_int g_phys_sig = 0; atomic_int g_phys_done = 1;
+atomic_int g_top_sig  = 0; atomic_int g_top_done  = 1;
+atomic_int g_bot_sig  = 0; atomic_int g_bot_done  = 1;
+
 
 // ========================================================
 // CROSS-PLATFORM THREADING BRIDGE
@@ -1181,21 +1191,34 @@ EXPORT void vmath_swarm_smales(
 // CORE 3 & CORE 4: RASTER WORKERS
 // ========================================================
 THREAD_FUNC vmath_raster_worker(void* arg) {
-    RasterThreadPayload* p = (RasterThreadPayload*)arg;
-    RenderMemory* mem = p->mem;
+    int is_bot = (int)(intptr_t)arg;
+    RasterThreadPayload* p = is_bot ? &g_raster_bot_payload : &g_raster_top_payload;
+    atomic_int* my_sig  = is_bot ? &g_bot_sig  : &g_top_sig;
+    atomic_int* my_done = is_bot ? &g_bot_done : &g_top_done;
 
-    // Pass the absolute base memory pointers and the display list
-    vmath_rasterize_list(
-        p->display_list, p->list_count,
-        mem->Tri_V1, mem->Tri_V2, mem->Tri_V3,
-        mem->Vert_PX, mem->Vert_PY, mem->Vert_PZ, 
-        mem->Tri_ShadedColor,
-        p->ScreenPtr, p->ZBuffer, p->CANVAS_W, p->CANVAS_H,
-        p->min_clip_y, p->max_clip_y
-    );
+    while (1) {
+        // SPIN-WAIT FOR SIGNAL
+        while (atomic_load(my_sig) == 0) { _mm_pause(); }
+        if (atomic_load(my_sig) == 2) break; // Quit signal
 
+        RenderMemory* mem = p->mem;
+
+        vmath_rasterize_list(
+            p->display_list, p->list_count,
+            mem->Tri_V1, mem->Tri_V2, mem->Tri_V3,
+            mem->Vert_PX, mem->Vert_PY, mem->Vert_PZ, 
+            mem->Tri_ShadedColor,
+            p->ScreenPtr, p->ZBuffer, p->CANVAS_W, p->CANVAS_H,
+            p->min_clip_y, p->max_clip_y
+        );
+
+        // WORK FINISHED: Reset signal and flag done!
+        atomic_store(my_sig, 0);
+        atomic_store(my_done, 1);
+    }
     return THREAD_RETURN_VAL;
 }
+
 EXPORT void vmath_render_batch(
     int start_id, int end_id,
     CameraState* cam, float HALF_W, float HALF_H, float sun_x, float sun_y, float sun_z,
@@ -1267,28 +1290,30 @@ EXPORT void vmath_render_batch(
             }
         }
     }
-
-    // --- PHASE 2: DISPATCH CORE 3 AND CORE 4 (RASTERIZATION) ---
-    // Setup Top Half Payload
-    g_raster_top_payload.display_list = g_TopList;
-    g_raster_top_payload.list_count = top_count;
+    // --- PHASE 2: ATOMIC DISPATCH ---
+    // Setup Payloads (Same as before)
+    g_raster_top_payload.display_list = g_TopList; g_raster_top_payload.list_count = top_count;
     g_raster_top_payload.mem = mem; g_raster_top_payload.ScreenPtr = ScreenPtr; g_raster_top_payload.ZBuffer = ZBuffer;
     g_raster_top_payload.CANVAS_W = CANVAS_W; g_raster_top_payload.CANVAS_H = CANVAS_H;
     g_raster_top_payload.min_clip_y = 0; g_raster_top_payload.max_clip_y = mid_y - 1;
 
-    // Setup Bottom Half Payload
-    g_raster_bot_payload.display_list = g_BotList;
-    g_raster_bot_payload.list_count = bot_count;
+    g_raster_bot_payload.display_list = g_BotList; g_raster_bot_payload.list_count = bot_count;
     g_raster_bot_payload.mem = mem; g_raster_bot_payload.ScreenPtr = ScreenPtr; g_raster_bot_payload.ZBuffer = ZBuffer;
     g_raster_bot_payload.CANVAS_W = CANVAS_W; g_raster_bot_payload.CANVAS_H = CANVAS_H;
     g_raster_bot_payload.min_clip_y = mid_y; g_raster_bot_payload.max_clip_y = CANVAS_H - 1;
 
-    // FIRE THE THREADS!
-    g_raster_top_thread = vmath_thread_start(vmath_raster_worker, &g_raster_top_payload);
-    g_raster_bot_thread = vmath_thread_start(vmath_raster_worker, &g_raster_bot_payload);
+    // 1. Reset 'Done' flags
+    atomic_store(&g_top_done, 0);
+    atomic_store(&g_bot_done, 0);
 
-    vmath_thread_join(g_raster_top_thread);
-    vmath_thread_join(g_raster_bot_thread);
+    // 2. SIGNAL WORKERS TO WAKE UP INSTANTLY!
+    atomic_store(&g_top_sig, 1);
+    atomic_store(&g_bot_sig, 1);
+
+    // 3. Main thread spin-waits for them to finish
+    while (atomic_load(&g_top_done) == 0 || atomic_load(&g_bot_done) == 0) {
+        _mm_pause();
+    }
 }
 
 // A dead-simple scalar sphere. No noise, no SIMD, purely a stable target for our Transition Weaving tests.
@@ -1370,66 +1395,75 @@ EXPORT void vmath_swarm_sort_depth(
 // CORE 2: PHYSICS WORKER
 // ========================================================
 THREAD_FUNC vmath_physics_worker(void* arg) {
-    PhysicsThreadPayload* p = (PhysicsThreadPayload*)arg;
-    
-    // Unpack the payload so the cases can use these variables directly!
-    RenderMemory* mem = p->mem;
-    float time = p->time;
-    float dt = p->dt;
-    int r = p->read_idx;
-    int w = p->write_idx;
+    PhysicsThreadPayload* p = &g_physics_payload;
 
-    for (int i = 0; i < p->command_count; i++) {
-        int opcode = p->queue[i];
+    while (1) {
+        // SPIN-WAIT FOR SIGNAL
+        while (atomic_load(&g_phys_sig) == 0) { _mm_pause(); }
+        if (atomic_load(&g_phys_sig) == 2) break; // Quit signal
 
-        switch (opcode) {
-            case 2: // SWARM_APPLY_BASE_PHYSICS (The Bridge: Reads from R, Writes to W)
-                vmath_swarm_update_velocities(10000, 
+        RenderMemory* mem = p->mem;
+        float time = p->time;
+        float dt = p->dt;
+        int r = p->read_idx;
+        int w = p->write_idx;
+
+        for (int i = 0; i < p->command_count; i++) {
+            // ... [KEEP YOUR EXACT PHYSICS SWITCH STATEMENT HERE] ...
+            int opcode = p->queue[i];
+
+            switch (opcode) {
+                case 2: // SWARM_APPLY_BASE_PHYSICS (The Bridge: Reads from R, Writes to W)
+                    vmath_swarm_update_velocities(10000, 
                     mem->Swarm_PX[r], mem->Swarm_PY[r], mem->Swarm_PZ[r], mem->Swarm_VX[r], mem->Swarm_VY[r], mem->Swarm_VZ[r],
                     mem->Swarm_PX[w], mem->Swarm_PY[w], mem->Swarm_PZ[w], mem->Swarm_VX[w], mem->Swarm_VY[w], mem->Swarm_VZ[w],
                     -15000, 15000, -4000, 15000, -15000, 15000, dt, -8000.0f * mem->Swarm_GravityBlend);
-                break;
+                    break;
 
-            case 3: // SWARM_BUNDLE (State 1) - Everything else modifies W!
-                vmath_swarm_bundle(10000, mem->Swarm_PX[w], mem->Swarm_PY[w], mem->Swarm_PZ[w], mem->Swarm_VX[w], mem->Swarm_VY[w], mem->Swarm_VZ[w], mem->Swarm_Seed, 0, 5000, 0, time, dt);
-                break;
+                case 3: // SWARM_BUNDLE (State 1) - Everything else modifies W!
+                    vmath_swarm_bundle(10000, mem->Swarm_PX[w], mem->Swarm_PY[w], mem->Swarm_PZ[w], mem->Swarm_VX[w], mem->Swarm_VY[w], mem->Swarm_VZ[w], mem->Swarm_Seed, 0, 5000, 0, time, dt);
+                    break;
 
-            case 4: // SWARM_GALAXY (State 2)
-                vmath_swarm_galaxy(10000, mem->Swarm_PX[w], mem->Swarm_PY[w], mem->Swarm_PZ[w], mem->Swarm_VX[w], mem->Swarm_VY[w], mem->Swarm_VZ[w], mem->Swarm_Seed, 0, 5000, 0, time, dt);
-                break;
+                case 4: // SWARM_GALAXY (State 2)
+                    vmath_swarm_galaxy(10000, mem->Swarm_PX[w], mem->Swarm_PY[w], mem->Swarm_PZ[w], mem->Swarm_VX[w], mem->Swarm_VY[w], mem->Swarm_VZ[w], mem->Swarm_Seed, 0, 5000, 0, time, dt);
+                    break;
 
-            case 5: // SWARM_TORNADO (State 3)
-                vmath_swarm_tornado(10000, mem->Swarm_PX[w], mem->Swarm_PY[w], mem->Swarm_PZ[w], mem->Swarm_VX[w], mem->Swarm_VY[w], mem->Swarm_VZ[w], mem->Swarm_Seed, 0, 5000, 0, time, dt);
-                break;
+                case 5: // SWARM_TORNADO (State 3)
+                    vmath_swarm_tornado(10000, mem->Swarm_PX[w], mem->Swarm_PY[w], mem->Swarm_PZ[w], mem->Swarm_VX[w], mem->Swarm_VY[w], mem->Swarm_VZ[w], mem->Swarm_Seed, 0, 5000, 0, time, dt);
+                    break;
 
-            case 6: // SWARM_GYROSCOPE (State 4)
-                vmath_swarm_gyroscope(10000, mem->Swarm_PX[w], mem->Swarm_PY[w], mem->Swarm_PZ[w], mem->Swarm_VX[w], mem->Swarm_VY[w], mem->Swarm_VZ[w], mem->Swarm_Seed, 0, 5000, 0, time, dt);
-                break;
+                case 6: // SWARM_GYROSCOPE (State 4)
+                    vmath_swarm_gyroscope(10000, mem->Swarm_PX[w], mem->Swarm_PY[w], mem->Swarm_PZ[w], mem->Swarm_VX[w], mem->Swarm_VY[w], mem->Swarm_VZ[w], mem->Swarm_Seed, 0, 5000, 0, time, dt);
+                    break;
 
-            case 7: // SWARM_METAL (State 5)
-                vmath_swarm_metal(10000, mem->Swarm_PX[w], mem->Swarm_PY[w], mem->Swarm_PZ[w], mem->Swarm_VX[w], mem->Swarm_VY[w], mem->Swarm_VZ[w], mem->Swarm_Seed, 0, 5000, 0, time, dt, mem->Swarm_MetalBlend);
-                break;
+                case 7: // SWARM_METAL (State 5)
+                    vmath_swarm_metal(10000, mem->Swarm_PX[w], mem->Swarm_PY[w], mem->Swarm_PZ[w], mem->Swarm_VX[w], mem->Swarm_VY[w], mem->Swarm_VZ[w], mem->Swarm_Seed, 0, 5000, 0, time, dt, mem->Swarm_MetalBlend);
+                    break;
 
-            case 8: // SWARM_PARADOX (State 6)
-                vmath_swarm_smales(10000, mem->Swarm_PX[w], mem->Swarm_PY[w], mem->Swarm_PZ[w], mem->Swarm_VX[w], mem->Swarm_VY[w], mem->Swarm_VZ[w], mem->Swarm_Seed, 0, 5000, 0, time, dt, mem->Swarm_ParadoxBlend);
-                break;
-                
-            case 12: // SWARM_EXPLOSION_PUSH
-                vmath_swarm_apply_explosion(10000, mem->Swarm_PX[w], mem->Swarm_PY[w], mem->Swarm_PZ[w], mem->Swarm_VX[w], mem->Swarm_VY[w], mem->Swarm_VZ[w], 0, 5000, 0, 5000000.0f * dt, 15000.0f);
-                break;
+                case 8: // SWARM_PARADOX (State 6)
+                    vmath_swarm_smales(10000, mem->Swarm_PX[w], mem->Swarm_PY[w], mem->Swarm_PZ[w], mem->Swarm_VX[w], mem->Swarm_VY[w], mem->Swarm_VZ[w], mem->Swarm_Seed, 0, 5000, 0, time, dt, mem->Swarm_ParadoxBlend);
+                    break;
 
-            case 13: // SWARM_EXPLOSION_PULL
-                vmath_swarm_apply_explosion(10000, mem->Swarm_PX[w], mem->Swarm_PY[w], mem->Swarm_PZ[w], mem->Swarm_VX[w], mem->Swarm_VY[w], mem->Swarm_VZ[w], 0, 5000, 0, -4000000.0f * dt, 20000.0f);
-                break;
+                case 12: // SWARM_EXPLOSION_PUSH
+                    vmath_swarm_apply_explosion(10000, mem->Swarm_PX[w], mem->Swarm_PY[w], mem->Swarm_PZ[w], mem->Swarm_VX[w], mem->Swarm_VY[w], mem->Swarm_VZ[w], 0, 5000, 0, 5000000.0f * dt, 15000.0f);
+                    break;
 
-            case 14: // SWARM_SORT_DEPTH
-                vmath_swarm_sort_depth(10000, mem->Swarm_PX[w], mem->Swarm_PY[w], mem->Swarm_PZ[w], mem->Swarm_Indices[w], mem->Swarm_TempIndices, mem->Swarm_Distances, mem->Swarm_TempDistances, 0, 0, 0); // Note: Assuming camera is near 0,0,0 for now
-                break;
+                case 13: // SWARM_EXPLOSION_PULL
+                    vmath_swarm_apply_explosion(10000, mem->Swarm_PX[w], mem->Swarm_PY[w], mem->Swarm_PZ[w], mem->Swarm_VX[w], mem->Swarm_VY[w], mem->Swarm_VZ[w], 0, 5000, 0, -4000000.0f * dt, 20000.0f);
+                    break;
+
+                case 14: // SWARM_SORT_DEPTH
+                    vmath_swarm_sort_depth(10000, mem->Swarm_PX[w], mem->Swarm_PY[w], mem->Swarm_PZ[w], mem->Swarm_Indices[w], mem->Swarm_TempIndices, mem->Swarm_Distances, mem->Swarm_TempDistances, 0, 0, 0); // Note: Assuming camera is near 0,0,0 for now
+                    break;
+            }
         }
+        // WORK FINISHED: Reset signal and flag done!
+        atomic_store(&g_phys_sig, 0);
+        atomic_store(&g_phys_done, 1);
     }
-
     return THREAD_RETURN_VAL;
 }
+
 // ========================================================
 // CORE 1: MAIN DISPATCHER & RENDERER
 // ========================================================
@@ -1449,8 +1483,11 @@ EXPORT void vmath_execute_queue(
     g_physics_payload.dt = dt;
     g_physics_payload.read_idx = read_idx;
     g_physics_payload.write_idx = write_idx;
-    
-    g_physics_thread = vmath_thread_start(vmath_physics_worker, &g_physics_payload);
+    // i commented this out i think its correct, gemini?
+    // g_physics_thread = vmath_thread_start(vmath_physics_worker, &g_physics_payload);
+
+    atomic_store(&g_phys_done, 0);
+    atomic_store(&g_phys_sig, 1); // WAKE UP PHYSICS!
 
     // 2. CORE 1 EXECUTES RENDER COMMANDS SIMULTANEOUSLY
     float HALF_W = CANVAS_W * 0.5f;
@@ -1482,5 +1519,15 @@ EXPORT void vmath_execute_queue(
     }
 
     // 3. SYNCHRONIZATION POINT (Wait for Physics to finish)
-    vmath_thread_join(g_physics_thread);
+    // same here
+    // vmath_thread_join(g_physics_thread);
+    while (atomic_load(&g_phys_done) == 0) {
+        _mm_pause();
+    }
+}
+EXPORT void vmath_init_thread_pool() {
+    // Lua will call this EXACTLY ONCE when the game boots!
+    g_physics_thread = vmath_thread_start(vmath_physics_worker, NULL);
+    g_raster_top_thread = vmath_thread_start(vmath_raster_worker, (void*)(intptr_t)0);
+    g_raster_bot_thread = vmath_thread_start(vmath_raster_worker, (void*)(intptr_t)1);
 }

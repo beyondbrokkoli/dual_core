@@ -38,7 +38,8 @@ function love.load()
     Sequence.LoadModule("camera", MainCamera)
     Sequence.LoadModule("swarm")
     Sequence.RunPhase("Init")
-
+    -- Ignite the Permanent Quad-Core Engine!
+    VibeMath.vmath_init_thread_pool()
 end
 
 function love.update(dt)
