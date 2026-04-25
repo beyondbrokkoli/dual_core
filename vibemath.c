@@ -145,7 +145,8 @@ typedef struct {
 
     int *Tri_V1, *Tri_V2, *Tri_V3;
     uint32_t *Tri_BakedColor, *Tri_ShadedColor; bool *Tri_Valid;
-    float *Tri_MinY, *Tri_MaxY; // <--- ADDED HERE
+    float *Tri_MinY, *Tri_MaxY;
+    float *Tri_LNX, *Tri_LNY, *Tri_LNZ; // <--- THE GOAT OPTIMIZATION
 
     // --- [NEW] DOUBLE BUFFERED ARRAYS ---
     float *Swarm_PX[2]; float *Swarm_PY[2]; float *Swarm_PZ[2];
