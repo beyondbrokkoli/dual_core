@@ -512,21 +512,34 @@ EXPORT void vmath_rasterize_triangles(
     int canvas_w, int canvas_h,
     int min_clip_y, int max_clip_y // <--- [NEW PARAMETERS]
 ) {
-    for (int i = 0; i < tCount; i++) {
+
+
+for (int i = 0; i < tCount; i++) {
         if (!tri_valid[i]) continue;
 
         int i1 = v1[i], i2 = v2[i], i3 = v3[i];
-        float x1 = px[i1], y1 = py[i1], z1 = pz[i1];
-        float x2 = px[i2], y2 = py[i2], z2 = pz[i2];
-        float x3 = px[i3], y3 = py[i3], z3 = pz[i3];
+        
+        // 1. ONLY fetch Y first
+        float y1 = py[i1], y2 = py[i2], y3 = py[i3];
 
-        // Broadcast color to 8-wide integer register
+        // --- [NEW] FAST Y-REJECT ---
+        // If all 3 vertices are completely above or completely below this thread's clip zone, skip EVERYTHING!
+        if (y1 < min_clip_y && y2 < min_clip_y && y3 < min_clip_y) continue;
+        if (y1 > max_clip_y && y2 > max_clip_y && y3 > max_clip_y) continue;
+
+        // 2. Now it is safe to fetch X, Z, and Color
+        float x1 = px[i1], z1 = pz[i1];
+        float x2 = px[i2], z2 = pz[i2];
+        float x3 = px[i3], z3 = pz[i3];
+
         __m256i v_color = _mm256_set1_epi32((int)shaded_color[i]);
 
+        // 3. Sort the vertices
         if (y1 > y2) { float t=x1; x1=x2; x2=t;  t=y1; y1=y2; y2=t;  t=z1; z1=z2; z2=t; }
         if (y1 > y3) { float t=x1; x1=x3; x3=t;  t=y1; y1=y3; y3=t;  t=z1; z1=z3; z3=t; }
         if (y2 > y3) { float t=x2; x2=x3; x3=t;  t=y2; y2=y3; y3=t;  t=z2; z2=z3; z3=t; }
 
+        // ... [Rest of your rasterizer] ...
         float total_height = y3 - y1;
         if (total_height <= 0.0f) continue;
 
@@ -535,8 +548,8 @@ EXPORT void vmath_rasterize_triangles(
         int y_end   = (int)fminf((float)max_clip_y, floorf(y3));
 
         // If the entire triangle is outside this core's designated screen half, skip it entirely!
-        if (y_start > y_end) continue; 
-        
+        if (y_start > y_end) continue;
+
         float inv_total = 1.0f / total_height;
 
         // ==========================================
