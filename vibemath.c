@@ -135,6 +135,7 @@ typedef struct {
 
     int *Tri_V1, *Tri_V2, *Tri_V3;
     uint32_t *Tri_BakedColor, *Tri_ShadedColor; bool *Tri_Valid;
+    float *Tri_MinY, *Tri_MaxY; // <--- ADDED HERE
 
     // --- [NEW] DOUBLE BUFFERED ARRAYS ---
     float *Swarm_PX[2]; float *Swarm_PY[2]; float *Swarm_PZ[2];
@@ -326,6 +327,7 @@ EXPORT void vmath_process_triangles(
     float* px, float* py, float* pz,
     float* lx, float* ly, float* lz,
     uint32_t* baked_color, uint32_t* shaded_color, bool* tri_valid,
+    float* tri_min_y, float* tri_max_y, // <--- NEW PARAMS
     float rx, float ry, float rz,
     float ux, float uy, float uz,
     float fx, float fy, float fz,
@@ -375,6 +377,13 @@ EXPORT void vmath_process_triangles(
         __m256 py2 = _mm256_i32gather_ps(py, vi2, 4);
         __m256 px3 = _mm256_i32gather_ps(px, vi3, 4);
         __m256 py3 = _mm256_i32gather_ps(py, vi3, 4);
+        // --- [NEW] AVX2 BOUNDING BOX CACHING ---
+        // Calculate min and max Y while the data is already warm in the registers!
+        __m256 v_min_y = _mm256_min_ps(py1, _mm256_min_ps(py2, py3));
+        __m256 v_max_y = _mm256_max_ps(py1, _mm256_max_ps(py2, py3));
+
+        _mm256_storeu_ps(&tri_min_y[i], v_min_y);
+        _mm256_storeu_ps(&tri_max_y[i], v_max_y);
 
         // 4. Backface Culling (Cross Product < 0)
         __m256 dx1 = _mm256_sub_ps(px2, px1);
@@ -480,6 +489,9 @@ EXPORT void vmath_process_triangles(
         float px1 = px[i1], py1 = py[i1];
         float px2 = px[i2], py2 = py[i2];
         float px3 = px[i3], py3 = py[i3];
+
+        tri_min_y[i] = fminf(py1, fminf(py2, py3));
+        tri_max_y[i] = fmaxf(py1, fmaxf(py2, py3));
 
         float cross = (px2 - px1) * (py3 - py1) - (py2 - py1) * (px3 - px1);
         if (cross >= 0) { tri_valid[i] = false; continue; }
@@ -1224,11 +1236,12 @@ EXPORT void vmath_render_batch(
             mem->Tri_V1 + tStart, mem->Tri_V2 + tStart, mem->Tri_V3 + tStart, mem->Vert_Valid,
             mem->Vert_PX, mem->Vert_PY, mem->Vert_PZ, mem->Vert_LX, mem->Vert_LY, mem->Vert_LZ,
             mem->Tri_BakedColor + tStart, mem->Tri_ShadedColor + tStart, mem->Tri_Valid + tStart,
+            mem->Tri_MinY, mem->Tri_MaxY,
             rx, ry, rz, ux, uy, uz, fx, fy, fz,
             sun_x, sun_y, sun_z
         );
     }
-    // --- PHASE 1.5: THE SMART CACHE BINNER ---
+    // --- PHASE 1.5: THE CACHE-PERFECT BINNER ---
     int top_count = 0;
     int bot_count = 0;
     int mid_y = CANVAS_H / 2;
@@ -1238,21 +1251,14 @@ EXPORT void vmath_render_batch(
         int tCount = mem->Obj_TriCount[id];
 
         for (int i = 0; i < tCount; i++) {
-            int abs_i = tStart + i; // Absolute Triangle ID
+            int abs_i = tStart + i;
 
-            // If lighting or backface culling killed it, completely ignore it!
             if (!mem->Tri_Valid[abs_i]) continue;
 
-            // Fetch the Y coordinates of the 3 vertices
-            float y1 = mem->Vert_PY[mem->Tri_V1[abs_i]];
-            float y2 = mem->Vert_PY[mem->Tri_V2[abs_i]];
-            float y3 = mem->Vert_PY[mem->Tri_V3[abs_i]];
+            // BLISTERING FAST: Pure sequential reads from linear RAM!
+            float min_y = mem->Tri_MinY[abs_i];
+            float max_y = mem->Tri_MaxY[abs_i];
 
-            // Find triangle bounds
-            float min_y = y1 < y2 ? (y1 < y3 ? y1 : y3) : (y2 < y3 ? y2 : y3);
-            float max_y = y1 > y2 ? (y1 > y3 ? y1 : y3) : (y2 > y3 ? y2 : y3);
-
-            // Bin them! (If a triangle crosses the middle line, it gets put in BOTH lists!)
             if (min_y < mid_y) {
                 g_TopList[top_count++] = abs_i;
             }
